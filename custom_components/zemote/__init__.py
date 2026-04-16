@@ -6,7 +6,6 @@ import logging
 import os
 import ssl
 import tempfile
-import time
 import uuid
 from typing import Any
 
@@ -31,10 +30,10 @@ CERT_STORAGE_KEY     = f"{DOMAIN}_cert"
 CERT_STORAGE_VERSION = 1
 
 try:
-    from paho.mqtt.client import CallbackAPIVersion  # paho >= 2.0
+    from paho.mqtt.client import CallbackAPIVersion
     _PAHO_V2 = True
 except ImportError:
-    _PAHO_V2 = False  # paho 1.x fallback
+    _PAHO_V2 = False
 
 
 def _fetch_cognito_credentials(identity_id: str, region: str) -> dict:
@@ -66,9 +65,7 @@ async def _load_or_create_cert(hass: HomeAssistant, creds: dict, region: str) ->
     store = Store(hass, CERT_STORAGE_VERSION, CERT_STORAGE_KEY)
     cert_data = await store.async_load()
     if cert_data:
-        _LOGGER.debug("Zemote: loaded existing X.509 cert from storage")
         return cert_data
-    _LOGGER.info("Zemote: creating new X.509 certificate...")
     cert_data = await hass.async_add_executor_job(_create_cert, creds, region)
     await store.async_save(cert_data)
     return cert_data
@@ -107,6 +104,7 @@ class ZemoteHub:
         self.entry        = entry
         self._cert_data   = cert_data
         self._mqtt        = None
+        self._tmp_files: list[str] = []
         self.devices: list[dict]            = entry.data.get("devices", [])
         self.device_states: dict[str, dict] = {}
 
@@ -123,6 +121,19 @@ class ZemoteHub:
             except Exception:
                 pass
             self._mqtt = None
+        for f in self._tmp_files:
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
+        self._tmp_files.clear()
+
+    def _write_tmp(self, content: str, suffix: str) -> str:
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(content)
+        self._tmp_files.append(path)
+        return path
 
     def _connect_mqtt(self) -> None:
         if _PAHO_V2:
@@ -134,10 +145,23 @@ class ZemoteHub:
         else:
             client = mqtt.Client(client_id=str(uuid.uuid4()), protocol=mqtt.MQTTv311)
 
+        cert_path = self._write_tmp(self._cert_data["certificatePem"], ".pem")
+        key_path  = self._write_tmp(self._cert_data["privateKey"],     ".key")
+        ca_path   = certifi.where()
+
+        client.tls_set(
+            ca_certs=ca_path,
+            certfile=cert_path,
+            keyfile=key_path,
+            tls_version=ssl.PROTOCOL_TLSv1_2,
+        )
         client.on_connect    = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_message    = self._on_shadow_message
+        client.connect(AWS_IOT_ENDPOINT, 8883, keepalive=60)
+        client.loop_start()
         self._mqtt = client
+        _LOGGER.info("Zemote: MQTT connected to %s", AWS_IOT_ENDPOINT)
 
     def _on_connect(self, client, userdata, flags, rc_or_reason, properties=None) -> None:
         rc = rc_or_reason if not hasattr(rc_or_reason, "value") else rc_or_reason.value
