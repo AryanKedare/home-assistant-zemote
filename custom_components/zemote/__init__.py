@@ -1,6 +1,7 @@
 """Zemote Home Automation - Home Assistant integration."""
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any
@@ -10,8 +11,9 @@ import paho.mqtt.client as mqtt
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import DOMAIN, PLATFORMS, AWS_IOT_ENDPOINT
+from .const import DOMAIN, PLATFORMS, SIGNAL_STATE_UPDATED
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +56,7 @@ class ZemoteHub:
 
     def setup(self) -> None:
         self._connect_mqtt()
+        self._subscribe_all()
 
     def disconnect(self) -> None:
         if self._mqtt:
@@ -76,8 +79,8 @@ class ZemoteHub:
 
         client.on_connect    = self._on_connect
         client.on_disconnect = self._on_disconnect
+        client.on_message    = self._on_shadow_message
         self._mqtt = client
-        _LOGGER.info("Zemote: MQTT hub initialised")
 
     def _on_connect(self, client, userdata, flags, rc_or_reason, properties=None) -> None:
         rc = rc_or_reason if not hasattr(rc_or_reason, "value") else rc_or_reason.value
@@ -88,6 +91,26 @@ class ZemoteHub:
         code = rc if rc is not None else rc_or_flags
         if code != 0:
             _LOGGER.warning("Zemote MQTT disconnected unexpectedly (rc=%s)", code)
+
+    def _subscribe_all(self) -> None:
+        for serial in {d["serialNumber"] for d in self.devices}:
+            if self._mqtt:
+                self._mqtt.subscribe(f"$aws/things/{serial}/shadow/update/accepted", qos=0)
+
+    def _on_shadow_message(self, client, userdata, message) -> None:
+        try:
+            parts    = message.topic.split("/")
+            serial   = parts[2] if len(parts) > 2 else "unknown"
+            outer    = json.loads(message.payload.decode("utf-8"))
+            state    = outer.get("state", {})
+            reported = state.get("reported", {}) if isinstance(state, dict) else {}
+            self.device_states[serial] = {**self.device_states.get(serial, {}), **reported}
+            self.hass.loop.call_soon_threadsafe(
+                async_dispatcher_send, self.hass,
+                f"{SIGNAL_STATE_UPDATED}_{serial}", reported,
+            )
+        except Exception as err:
+            _LOGGER.error("Zemote shadow parse error [%s]: %s", message.topic, err)
 
     def get_channel_state(self, serial: str, channel_key: str) -> Any:
         return self.device_states.get(serial, {}).get(channel_key)
