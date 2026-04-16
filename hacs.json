@@ -1,0 +1,6 @@
+{
+  "name": "Zemote",
+  "domains": ["light", "fan", "switch", "cover", "remote"],
+  "iot_class": "cloud_push",
+  "homeassistant": "2023.6.0"
+}
