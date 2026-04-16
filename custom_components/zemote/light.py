@@ -30,10 +30,7 @@ async def async_setup_entry(
     for d in hub.devices:
         if d.get("platform") != "light":
             continue
-        if d.get("isRgb"):
-            entities.append(ZemoteRgbLight(hub, d))
-        else:
-            entities.append(ZemoteLight(hub, d))
+        entities.append(ZemoteRgbLight(hub, d) if d.get("isRgb") else ZemoteLight(hub, d))
     async_add_entities(entities)
 
 
@@ -48,8 +45,6 @@ def _device_info(device: dict, serial: str) -> DeviceInfo:
 
 
 class ZemoteLight(LightEntity):
-    """Zemote dimmable or on/off light."""
-
     def __init__(self, hub: ZemoteHub, device: dict) -> None:
         self._hub        = hub
         self._device     = device
@@ -90,6 +85,7 @@ class ZemoteLight(LightEntity):
         val = self._hub.get_channel_state(self._serial, self._channel)
         if val is not None:
             self._apply_value(int(val))
+            self.async_write_ha_state()
 
     @callback
     def _handle_state_update(self, reported: dict) -> None:
@@ -119,8 +115,6 @@ class ZemoteLight(LightEntity):
 
 
 class ZemoteRgbLight(LightEntity):
-    """Zemote RGB light."""
-
     _attr_color_mode            = ColorMode.HS
     _attr_supported_color_modes = {ColorMode.HS}
 
@@ -162,9 +156,7 @@ class ZemoteRgbLight(LightEntity):
 
     @callback
     def _handle_state_update(self, reported: dict) -> None:
-        r = reported.get("R")
-        g = reported.get("G")
-        b = reported.get("B")
+        r, g, b = reported.get("R"), reported.get("G"), reported.get("B")
         if r is not None and g is not None and b is not None:
             r, g, b = int(r), int(g), int(b)
             self._state = any([r, g, b])
@@ -177,8 +169,7 @@ class ZemoteRgbLight(LightEntity):
         hs  = kwargs.get(ATTR_HS_COLOR, self._hs_color)
         bri = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
         h, s = hs[0] / 360, hs[1] / 100
-        v    = bri / 255
-        r, g, b = [round(c * 255) for c in colorsys.hsv_to_rgb(h, s, v)]
+        r, g, b = [round(c * 255) for c in colorsys.hsv_to_rgb(h, s, bri / 255)]
         self._state = True
         self._hs_color  = (hs[0], hs[1])
         self._brightness = bri
