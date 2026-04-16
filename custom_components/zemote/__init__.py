@@ -3,9 +3,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import ssl
+import tempfile
+import time
 import uuid
 from typing import Any
 
+import boto3
 import paho.mqtt.client as mqtt
 
 from homeassistant.config_entries import ConfigEntry
@@ -13,7 +18,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import DOMAIN, PLATFORMS, SIGNAL_STATE_UPDATED
+from .const import (
+    DOMAIN, PLATFORMS, SIGNAL_STATE_UPDATED,
+    AWS_REGION_COGNITO, AWS_IOT_ENDPOINT, IDENTITY_POOL_ID, IOT_POLICY_NAME,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,8 +32,39 @@ except ImportError:
     _PAHO_V2 = False
 
 
+def _fetch_cognito_credentials(identity_id: str, region: str) -> dict:
+    cognito = boto3.client("cognito-identity", region_name=region)
+    if not identity_id:
+        identity_id = cognito.get_id(IdentityPoolId=IDENTITY_POOL_ID)["IdentityId"]
+    return cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
+
+
+def _create_cert(creds: dict, region: str) -> dict:
+    """Provision a new X.509 certificate via AWS IoT and attach zemote_policy."""
+    iot = boto3.client(
+        "iot", region_name=region,
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretKey"],
+        aws_session_token=creds["SessionToken"],
+    )
+    result = iot.create_keys_and_certificate(setAsActive=True)
+    cert_data = {
+        "certificateArn": result["certificateArn"],
+        "certificateId":  result["certificateId"],
+        "certificatePem": result["certificatePem"],
+        "privateKey":     result["keyPair"]["PrivateKey"],
+    }
+    iot.attach_policy(policyName=IOT_POLICY_NAME, target=cert_data["certificateArn"])
+    return cert_data
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    hub = ZemoteHub(hass, entry)
+    identity_id = entry.data.get("identity_id", "")
+    creds = await hass.async_add_executor_job(
+        _fetch_cognito_credentials, identity_id, AWS_REGION_COGNITO
+    )
+    cert_data = await hass.async_add_executor_job(_create_cert, creds, AWS_REGION_COGNITO)
+    hub = ZemoteHub(hass, entry, cert_data)
     try:
         await hass.async_add_executor_job(hub.setup)
     except Exception as err:
@@ -47,9 +86,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 class ZemoteHub:
     """Central hub — one per config entry."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, cert_data: dict) -> None:
         self.hass         = hass
         self.entry        = entry
+        self._cert_data   = cert_data
         self._mqtt        = None
         self.devices: list[dict]            = entry.data.get("devices", [])
         self.device_states: dict[str, dict] = {}
