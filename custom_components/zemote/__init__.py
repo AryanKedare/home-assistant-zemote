@@ -76,7 +76,6 @@ class ZemoteHub:
             )
         else:
             client = mqtt.Client(client_id=str(uuid.uuid4()), protocol=mqtt.MQTTv311)
-
         client.on_connect    = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_message    = self._on_shadow_message
@@ -111,6 +110,20 @@ class ZemoteHub:
             )
         except Exception as err:
             _LOGGER.error("Zemote shadow parse error [%s]: %s", message.topic, err)
+
+    def publish(self, serial: str, payload: dict, _bypass_check: bool = False) -> None:
+        if not _bypass_check and (self._mqtt is None or not self._mqtt.is_connected()):
+            _LOGGER.warning("Zemote: MQTT not connected, dropping publish to %s", serial)
+            return
+        if self._mqtt:
+            self._mqtt.publish(
+                f"$aws/things/{serial}/shadow/update",
+                json.dumps({"state": {"desired": payload}}),
+                qos=0,
+            )
+
+    def set_channel(self, serial: str, channel_key: str, value: int | str) -> None:
+        self.publish(serial, {channel_key: value})
 
     def get_channel_state(self, serial: str, channel_key: str) -> Any:
         return self.device_states.get(serial, {}).get(channel_key)
