@@ -6,6 +6,8 @@ import logging
 import os
 import ssl
 import tempfile
+import threading
+import time
 import uuid
 from typing import Any
 
@@ -28,6 +30,8 @@ _LOGGER = logging.getLogger(__name__)
 
 CERT_STORAGE_KEY     = f"{DOMAIN}_cert"
 CERT_STORAGE_VERSION = 1
+_BACKOFF_BASE  = 5
+_BACKOFF_MAX   = 300
 
 try:
     from paho.mqtt.client import CallbackAPIVersion
@@ -104,16 +108,22 @@ class ZemoteHub:
         self.entry        = entry
         self._cert_data   = cert_data
         self._mqtt        = None
-        self._tmp_files: list[str] = []
+        self._tmp_files: list[str]          = []
+        self._stop_event  = threading.Event()
+        self._reconnect_thread: threading.Thread | None = None
         self.devices: list[dict]            = entry.data.get("devices", [])
         self.device_states: dict[str, dict] = {}
 
     def setup(self) -> None:
+        self._stop_event.clear()
         self._connect_mqtt()
         self._subscribe_all()
         self._ping_all()
+        self._reconnect_thread = threading.Thread(target=self._reconnect_loop, daemon=True)
+        self._reconnect_thread.start()
 
     def disconnect(self) -> None:
+        self._stop_event.set()
         if self._mqtt:
             try:
                 self._mqtt.loop_stop()
@@ -144,34 +154,47 @@ class ZemoteHub:
             )
         else:
             client = mqtt.Client(client_id=str(uuid.uuid4()), protocol=mqtt.MQTTv311)
-
         cert_path = self._write_tmp(self._cert_data["certificatePem"], ".pem")
         key_path  = self._write_tmp(self._cert_data["privateKey"],     ".key")
-        ca_path   = certifi.where()
-
-        client.tls_set(
-            ca_certs=ca_path,
-            certfile=cert_path,
-            keyfile=key_path,
-            tls_version=ssl.PROTOCOL_TLSv1_2,
-        )
+        client.tls_set(ca_certs=certifi.where(), certfile=cert_path, keyfile=key_path,
+                       tls_version=ssl.PROTOCOL_TLSv1_2)
         client.on_connect    = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_message    = self._on_shadow_message
         client.connect(AWS_IOT_ENDPOINT, 8883, keepalive=60)
         client.loop_start()
         self._mqtt = client
-        _LOGGER.info("Zemote: MQTT connected to %s", AWS_IOT_ENDPOINT)
+
+    def _reconnect_loop(self) -> None:
+        backoff = _BACKOFF_BASE
+        while not self._stop_event.is_set():
+            time.sleep(5)
+            if self._mqtt and self._mqtt.is_connected():
+                backoff = _BACKOFF_BASE
+                continue
+            if self._stop_event.is_set():
+                break
+            _LOGGER.warning("Zemote: MQTT disconnected, reconnecting in %ds", backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, _BACKOFF_MAX)
+            try:
+                self._connect_mqtt()
+                self._subscribe_all()
+                self._ping_all()
+            except Exception as err:
+                _LOGGER.error("Zemote: reconnect failed: %s", err)
 
     def _on_connect(self, client, userdata, flags, rc_or_reason, properties=None) -> None:
         rc = rc_or_reason if not hasattr(rc_or_reason, "value") else rc_or_reason.value
-        if rc != 0:
+        if rc == 0:
+            _LOGGER.info("Zemote: MQTT connected")
+        else:
             _LOGGER.error("Zemote MQTT connect failed rc=%s", rc)
 
     def _on_disconnect(self, client, userdata, rc_or_flags, rc=None, properties=None) -> None:
         code = rc if rc is not None else rc_or_flags
         if code != 0:
-            _LOGGER.warning("Zemote MQTT disconnected unexpectedly (rc=%s)", code)
+            _LOGGER.warning("Zemote MQTT disconnected (rc=%s)", code)
 
     def _subscribe_all(self) -> None:
         for serial in {d["serialNumber"] for d in self.devices}:
