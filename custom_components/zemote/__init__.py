@@ -57,6 +57,7 @@ class ZemoteHub:
     def setup(self) -> None:
         self._connect_mqtt()
         self._subscribe_all()
+        self._ping_all()
 
     def disconnect(self) -> None:
         if self._mqtt:
@@ -95,6 +96,10 @@ class ZemoteHub:
         for serial in {d["serialNumber"] for d in self.devices}:
             if self._mqtt:
                 self._mqtt.subscribe(f"$aws/things/{serial}/shadow/update/accepted", qos=0)
+
+    def _ping_all(self) -> None:
+        for serial in {d["serialNumber"] for d in self.devices}:
+            self.publish(serial, {"PING": "ping"}, _bypass_check=True)
 
     def _on_shadow_message(self, client, userdata, message) -> None:
         try:
