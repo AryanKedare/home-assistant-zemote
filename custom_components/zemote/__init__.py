@@ -11,6 +11,7 @@ import uuid
 from typing import Any
 
 import boto3
+import certifi
 import paho.mqtt.client as mqtt
 
 from homeassistant.config_entries import ConfigEntry
@@ -30,10 +31,10 @@ CERT_STORAGE_KEY     = f"{DOMAIN}_cert"
 CERT_STORAGE_VERSION = 1
 
 try:
-    from paho.mqtt.client import CallbackAPIVersion
+    from paho.mqtt.client import CallbackAPIVersion  # paho >= 2.0
     _PAHO_V2 = True
 except ImportError:
-    _PAHO_V2 = False
+    _PAHO_V2 = False  # paho 1.x fallback
 
 
 def _fetch_cognito_credentials(identity_id: str, region: str) -> dict:
@@ -132,6 +133,7 @@ class ZemoteHub:
             )
         else:
             client = mqtt.Client(client_id=str(uuid.uuid4()), protocol=mqtt.MQTTv311)
+
         client.on_connect    = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_message    = self._on_shadow_message
