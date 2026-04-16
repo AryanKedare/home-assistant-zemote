@@ -17,6 +17,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.storage import Store
 
 from .const import (
     DOMAIN, PLATFORMS, SIGNAL_STATE_UPDATED,
@@ -24,6 +25,9 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+CERT_STORAGE_KEY     = f"{DOMAIN}_cert"
+CERT_STORAGE_VERSION = 1
 
 try:
     from paho.mqtt.client import CallbackAPIVersion
@@ -40,7 +44,6 @@ def _fetch_cognito_credentials(identity_id: str, region: str) -> dict:
 
 
 def _create_cert(creds: dict, region: str) -> dict:
-    """Provision a new X.509 certificate via AWS IoT and attach zemote_policy."""
     iot = boto3.client(
         "iot", region_name=region,
         aws_access_key_id=creds["AccessKeyId"],
@@ -58,12 +61,24 @@ def _create_cert(creds: dict, region: str) -> dict:
     return cert_data
 
 
+async def _load_or_create_cert(hass: HomeAssistant, creds: dict, region: str) -> dict:
+    store = Store(hass, CERT_STORAGE_VERSION, CERT_STORAGE_KEY)
+    cert_data = await store.async_load()
+    if cert_data:
+        _LOGGER.debug("Zemote: loaded existing X.509 cert from storage")
+        return cert_data
+    _LOGGER.info("Zemote: creating new X.509 certificate...")
+    cert_data = await hass.async_add_executor_job(_create_cert, creds, region)
+    await store.async_save(cert_data)
+    return cert_data
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     identity_id = entry.data.get("identity_id", "")
     creds = await hass.async_add_executor_job(
         _fetch_cognito_credentials, identity_id, AWS_REGION_COGNITO
     )
-    cert_data = await hass.async_add_executor_job(_create_cert, creds, AWS_REGION_COGNITO)
+    cert_data = await _load_or_create_cert(hass, creds, AWS_REGION_COGNITO)
     hub = ZemoteHub(hass, entry, cert_data)
     try:
         await hass.async_add_executor_job(hub.setup)
