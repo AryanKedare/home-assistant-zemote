@@ -2,18 +2,18 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to Zemote",
-        "description": "Enter your Zemote account credentials.",
+        "title": "Zemote Login",
+        "description": "Enter your Zemote account credentials. Devices will be auto-discovered.",
         "data": {
-          "email": "Email",
+          "email":    "Email address",
           "password": "Password"
         }
       }
     },
     "error": {
-      "cannot_connect": "Unable to connect to the Zemote cloud.",
-      "invalid_auth": "Invalid email or password.",
-      "no_devices": "No devices found for this account."
+      "cannot_connect": "Could not connect to AWS — check your internet connection.",
+      "no_devices":     "Login succeeded but no devices were found for this account.",
+      "invalid_auth":   "Incorrect email or password."
     },
     "abort": {
       "already_configured": "This Zemote account is already configured."

@@ -1,23 +1,23 @@
-"""Light platform for Zemote integration."""
+"""Zemote light platform — on/off and dimmable channels."""
 from __future__ import annotations
 
-import colorsys
+import math
+import logging
 from typing import Any
 
 from homeassistant.components.light import (
-    ATTR_BRIGHTNESS,
-    ATTR_HS_COLOR,
-    ColorMode,
     LightEntity,
+    ColorMode,
+    ATTR_BRIGHTNESS,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import ZemoteHub
 from .const import DOMAIN, SIGNAL_STATE_UPDATED
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -25,158 +25,95 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    hub: ZemoteHub = hass.data[DOMAIN][entry.entry_id]
-    entities = []
-    for d in hub.devices:
-        if d.get("platform") != "light":
-            continue
-        entities.append(ZemoteRgbLight(hub, d) if d.get("isRgb") else ZemoteLight(hub, d))
-    async_add_entities(entities)
-
-
-def _device_info(device: dict, serial: str) -> DeviceInfo:
-    return DeviceInfo(
-        identifiers={(DOMAIN, serial)},
-        name=device.get("hubName", serial),
-        manufacturer="Contera IoT",
-        model="Zemote Hub",
-        suggested_area=device.get("roomName") or None,
-    )
+    hub = hass.data[DOMAIN][entry.entry_id]
+    lights = [
+        ZemoteLight(hub, d)
+        for d in hub.devices
+        if d["platform"] == "light"
+    ]
+    async_add_entities(lights, True)
 
 
 class ZemoteLight(LightEntity):
-    def __init__(self, hub: ZemoteHub, device: dict) -> None:
-        self._hub        = hub
-        self._device     = device
-        self._serial     = device["serialNumber"]
-        self._channel    = device["channelKey"]
-        self._attr_name  = device["name"]
-        self._attr_unique_id = device["applianceId"]
-        self._dimmable   = device.get("dimmable", False)
-        self._state      = False
-        self._brightness = 255
-        if self._dimmable:
+    """Represents a Zemote light channel."""
+
+    def __init__(self, hub: Any, device: dict) -> None:
+        self._hub     = hub
+        self._device  = device
+        self._serial  = device["serialNumber"]
+        self._channel = device["channelKey"]
+
+        self._attr_unique_id = f"zemote_{device['applianceId']}"
+        self._attr_name      = device["name"]
+
+        if device.get("dimmable", True):
             self._attr_color_mode            = ColorMode.BRIGHTNESS
             self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
         else:
             self._attr_color_mode            = ColorMode.ONOFF
             self._attr_supported_color_modes = {ColorMode.ONOFF}
 
-    @property
-    def device_info(self) -> DeviceInfo:
-        return _device_info(self._device, self._serial)
+        room = device.get("roomName")
+        if room:
+            self._attr_suggested_area = room
 
     @property
     def is_on(self) -> bool:
-        return self._state
+        val = self._hub.get_channel_state(self._serial, self._channel)
+        try:
+            return int(val) > 0
+        except (TypeError, ValueError):
+            return False
 
     @property
     def brightness(self) -> int | None:
-        return self._brightness if self._dimmable else None
-
-    async def async_added_to_hass(self) -> None:
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{SIGNAL_STATE_UPDATED}_{self._serial}",
-                self._handle_state_update,
-            )
-        )
+        if self._attr_color_mode != ColorMode.BRIGHTNESS:
+            return None
         val = self._hub.get_channel_state(self._serial, self._channel)
-        if val is not None:
-            self._apply_value(int(val))
-            self.async_write_ha_state()
+        try:
+            return math.ceil(int(val) / 100 * 255)
+        except (TypeError, ValueError):
+            return None
 
-    @callback
-    def _handle_state_update(self, reported: dict) -> None:
-        raw = reported.get(self._channel)
-        if raw is not None:
-            self._apply_value(int(raw))
-            self.async_write_ha_state()
-
-    def _apply_value(self, value: int) -> None:
-        if value == 0:
-            self._state = False
-            self._brightness = 0
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        if self._attr_color_mode == ColorMode.BRIGHTNESS:
+            bri_255 = kwargs.get(ATTR_BRIGHTNESS, 255)
+            bri_pct = max(1, min(100, round(bri_255 / 255 * 100)))
+            self._hub.set_channel(self._serial, self._channel, bri_pct)
         else:
-            self._state = True
-            self._brightness = min(255, round(value * 255 / 100))
+            self._hub.set_channel(self._serial, self._channel, 1)
 
-    def turn_on(self, **kwargs: Any) -> None:
-        pct = max(1, round(kwargs[ATTR_BRIGHTNESS] * 100 / 255)) if (ATTR_BRIGHTNESS in kwargs and self._dimmable) else 100
-        self._hub.set_channel(self._serial, self._channel, pct)
-        self._apply_value(pct)
-        self.schedule_update_ha_state()
-
-    def turn_off(self, **kwargs: Any) -> None:
+    async def async_turn_off(self, **kwargs: Any) -> None:
         self._hub.set_channel(self._serial, self._channel, 0)
-        self._apply_value(0)
-        self.schedule_update_ha_state()
-
-
-class ZemoteRgbLight(LightEntity):
-    _attr_color_mode            = ColorMode.HS
-    _attr_supported_color_modes = {ColorMode.HS}
-
-    def __init__(self, hub: ZemoteHub, device: dict) -> None:
-        self._hub        = hub
-        self._device     = device
-        self._serial     = device["serialNumber"]
-        self._channel    = device["channelKey"]
-        self._attr_name  = device["name"]
-        self._attr_unique_id = device["applianceId"]
-        self._state      = False
-        self._brightness = 255
-        self._hs_color: tuple[float, float] = (0, 0)
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return _device_info(self._device, self._serial)
-
-    @property
-    def is_on(self) -> bool:
-        return self._state
-
-    @property
-    def brightness(self) -> int:
-        return self._brightness
-
-    @property
-    def hs_color(self) -> tuple[float, float]:
-        return self._hs_color
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
                 f"{SIGNAL_STATE_UPDATED}_{self._serial}",
-                self._handle_state_update,
+                self._handle_update,
             )
         )
+        # Assign area via device registry — works even for existing entities
+        room = self._device.get("roomName")
+        if room:
+            await self._async_assign_area(room)
+
+    async def _async_assign_area(self, room_name: str) -> None:
+        """Look up or create the area and assign this device to it."""
+        from homeassistant.helpers import area_registry as ar, device_registry as dr
+        area_reg   = ar.async_get(self.hass)
+        device_reg = dr.async_get(self.hass)
+
+        area = area_reg.async_get_area_by_name(room_name)
+        if area is None:
+            area = area_reg.async_create(room_name)
+
+        device = device_reg.async_get_device(identifiers={(DOMAIN, self._attr_unique_id)})
+        if device and device.area_id != area.id:
+            device_reg.async_update_device(device.id, area_id=area.id)
 
     @callback
-    def _handle_state_update(self, reported: dict) -> None:
-        r, g, b = reported.get("R"), reported.get("G"), reported.get("B")
-        if r is not None and g is not None and b is not None:
-            r, g, b = int(r), int(g), int(b)
-            self._state = any([r, g, b])
-            h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
-            self._hs_color  = (h * 360, s * 100)
-            self._brightness = round(v * 255)
+    def _handle_update(self, reported: dict) -> None:
+        if self._channel in reported:
             self.async_write_ha_state()
-
-    def turn_on(self, **kwargs: Any) -> None:
-        hs  = kwargs.get(ATTR_HS_COLOR, self._hs_color)
-        bri = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
-        h, s = hs[0] / 360, hs[1] / 100
-        r, g, b = [round(c * 255) for c in colorsys.hsv_to_rgb(h, s, bri / 255)]
-        self._state = True
-        self._hs_color  = (hs[0], hs[1])
-        self._brightness = bri
-        self._hub.publish(self._serial, {"R": r, "G": g, "B": b})
-        self.schedule_update_ha_state()
-
-    def turn_off(self, **kwargs: Any) -> None:
-        self._state = False
-        self._hub.publish(self._serial, {"R": 0, "G": 0, "B": 0})
-        self.schedule_update_ha_state()
