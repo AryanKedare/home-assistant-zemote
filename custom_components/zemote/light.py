@@ -1,9 +1,16 @@
 """Light platform for Zemote integration."""
 from __future__ import annotations
 
+import colorsys
 from typing import Any
 
-from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode, LightEntity
+from homeassistant.components.light import (
+    ATTR_BRIGHTNESS,
+    ATTR_HS_COLOR,
+    ATTR_RGB_COLOR,
+    ColorMode,
+    LightEntity,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -20,9 +27,15 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub: ZemoteHub = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
-        ZemoteLight(hub, d) for d in hub.devices if d.get("platform") == "light"
-    ])
+    entities = []
+    for d in hub.devices:
+        if d.get("platform") != "light":
+            continue
+        if d.get("isRgb"):
+            entities.append(ZemoteRgbLight(hub, d))
+        else:
+            entities.append(ZemoteLight(hub, d))
+    async_add_entities(entities)
 
 
 class ZemoteLight(LightEntity):
@@ -38,7 +51,6 @@ class ZemoteLight(LightEntity):
         self._dimmable   = device.get("dimmable", False)
         self._state      = False
         self._brightness = 255
-
         if self._dimmable:
             self._attr_color_mode            = ColorMode.BRIGHTNESS
             self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
@@ -102,4 +114,84 @@ class ZemoteLight(LightEntity):
     def turn_off(self, **kwargs: Any) -> None:
         self._hub.set_channel(self._serial, self._channel, 0)
         self._apply_value(0)
+        self.schedule_update_ha_state()
+
+
+class ZemoteRgbLight(LightEntity):
+    """Zemote RGB light."""
+
+    _attr_color_mode            = ColorMode.HS
+    _attr_supported_color_modes = {ColorMode.HS}
+
+    def __init__(self, hub: ZemoteHub, device: dict) -> None:
+        self._hub        = hub
+        self._device     = device
+        self._serial     = device["serialNumber"]
+        self._channel    = device["channelKey"]
+        self._attr_name  = device["name"]
+        self._attr_unique_id = device["applianceId"]
+        self._state      = False
+        self._brightness = 255
+        self._hs_color: tuple[float, float] = (0, 0)
+        self._r = self._g = self._b = 255
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._serial)},
+            name=self._device.get("hubName", self._serial),
+            manufacturer="Contera IoT",
+            model="Zemote Hub",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        return self._state
+
+    @property
+    def brightness(self) -> int:
+        return self._brightness
+
+    @property
+    def hs_color(self) -> tuple[float, float]:
+        return self._hs_color
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{SIGNAL_STATE_UPDATED}_{self._serial}",
+                self._handle_state_update,
+            )
+        )
+
+    @callback
+    def _handle_state_update(self, reported: dict) -> None:
+        r = reported.get("R")
+        g = reported.get("G")
+        b = reported.get("B")
+        if r is not None and g is not None and b is not None:
+            self._r, self._g, self._b = int(r), int(g), int(b)
+            self._state = any([self._r, self._g, self._b])
+            h, s, v = colorsys.rgb_to_hsv(self._r / 255, self._g / 255, self._b / 255)
+            self._hs_color  = (h * 360, s * 100)
+            self._brightness = round(v * 255)
+            self.async_write_ha_state()
+
+    def turn_on(self, **kwargs: Any) -> None:
+        hs   = kwargs.get(ATTR_HS_COLOR, self._hs_color)
+        bri  = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
+        h, s = hs[0] / 360, hs[1] / 100
+        v    = bri / 255
+        r, g, b = [round(c * 255) for c in colorsys.hsv_to_rgb(h, s, v)]
+        self._r, self._g, self._b = r, g, b
+        self._state = True
+        self._hs_color  = (hs[0], hs[1])
+        self._brightness = bri
+        self._hub.publish(self._serial, {"R": r, "G": g, "B": b})
+        self.schedule_update_ha_state()
+
+    def turn_off(self, **kwargs: Any) -> None:
+        self._state = False
+        self._hub.publish(self._serial, {"R": 0, "G": 0, "B": 0})
         self.schedule_update_ha_state()
