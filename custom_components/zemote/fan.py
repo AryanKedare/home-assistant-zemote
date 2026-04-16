@@ -30,9 +30,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub: ZemoteHub = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
-        ZemoteFan(hub, d) for d in hub.devices if d.get("platform") == "fan"
-    ])
+    async_add_entities([ZemoteFan(hub, d) for d in hub.devices if d.get("platform") == "fan"])
 
 
 class ZemoteFan(FanEntity):
@@ -57,6 +55,7 @@ class ZemoteFan(FanEntity):
             name=self._device.get("hubName", self._serial),
             manufacturer="Contera IoT",
             model="Zemote Hub",
+            suggested_area=self._device.get("roomName") or None,
         )
 
     @property
@@ -91,9 +90,7 @@ class ZemoteFan(FanEntity):
 
     def turn_on(self, percentage: int | None = None, **kwargs: Any) -> None:
         if percentage is not None and percentage > 0:
-            step = max(1, min(SPEED_COUNT, math.ceil(
-                percentage_to_ranged_value(SPEED_RANGE, percentage)
-            )))
+            step = max(1, min(SPEED_COUNT, math.ceil(percentage_to_ranged_value(SPEED_RANGE, percentage))))
         else:
             step = 1
         shadow = SPEED_MAP[step]

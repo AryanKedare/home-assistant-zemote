@@ -31,9 +31,17 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class ZemoteSwitch(SwitchEntity):
-    """Zemote switch."""
+def _device_info(device: dict, serial: str) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, serial)},
+        name=device.get("hubName", serial),
+        manufacturer="Contera IoT",
+        model="Zemote Hub",
+        suggested_area=device.get("roomName") or None,
+    )
 
+
+class ZemoteSwitch(SwitchEntity):
     def __init__(self, hub: ZemoteHub, device: dict) -> None:
         self._hub        = hub
         self._device     = device
@@ -45,12 +53,7 @@ class ZemoteSwitch(SwitchEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._serial)},
-            name=self._device.get("hubName", self._serial),
-            manufacturer="Contera IoT",
-            model="Zemote Hub",
-        )
+        return _device_info(self._device, self._serial)
 
     @property
     def is_on(self) -> bool:
@@ -87,8 +90,6 @@ class ZemoteSwitch(SwitchEntity):
 
 
 class ZemoteSur(SwitchEntity):
-    """Zemote IR blaster (SUR) device."""
-
     def __init__(self, hub: ZemoteHub, device: dict) -> None:
         self._hub        = hub
         self._device     = device
@@ -100,12 +101,7 @@ class ZemoteSur(SwitchEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._serial)},
-            name=self._device.get("hubName", self._serial),
-            manufacturer="Contera IoT",
-            model="Zemote Hub",
-        )
+        return _device_info(self._device, self._serial)
 
     @property
     def is_on(self) -> bool:

@@ -24,9 +24,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub: ZemoteHub = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
-        ZemoteCover(hub, d) for d in hub.devices if d.get("platform") == "cover"
-    ])
+    async_add_entities([ZemoteCover(hub, d) for d in hub.devices if d.get("platform") == "cover"])
 
 
 class ZemoteCover(CoverEntity):
@@ -52,6 +50,7 @@ class ZemoteCover(CoverEntity):
             name=self._device.get("hubName", self._serial),
             manufacturer="Contera IoT",
             model="Zemote Hub",
+            suggested_area=self._device.get("roomName") or None,
         )
 
     @property

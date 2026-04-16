@@ -7,7 +7,6 @@ from typing import Any
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_HS_COLOR,
-    ATTR_RGB_COLOR,
     ColorMode,
     LightEntity,
 )
@@ -38,6 +37,16 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
+def _device_info(device: dict, serial: str) -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, serial)},
+        name=device.get("hubName", serial),
+        manufacturer="Contera IoT",
+        model="Zemote Hub",
+        suggested_area=device.get("roomName") or None,
+    )
+
+
 class ZemoteLight(LightEntity):
     """Zemote dimmable or on/off light."""
 
@@ -60,12 +69,7 @@ class ZemoteLight(LightEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._serial)},
-            name=self._device.get("hubName", self._serial),
-            manufacturer="Contera IoT",
-            model="Zemote Hub",
-        )
+        return _device_info(self._device, self._serial)
 
     @property
     def is_on(self) -> bool:
@@ -103,10 +107,7 @@ class ZemoteLight(LightEntity):
             self._brightness = min(255, round(value * 255 / 100))
 
     def turn_on(self, **kwargs: Any) -> None:
-        if ATTR_BRIGHTNESS in kwargs and self._dimmable:
-            pct = max(1, round(kwargs[ATTR_BRIGHTNESS] * 100 / 255))
-        else:
-            pct = 100
+        pct = max(1, round(kwargs[ATTR_BRIGHTNESS] * 100 / 255)) if (ATTR_BRIGHTNESS in kwargs and self._dimmable) else 100
         self._hub.set_channel(self._serial, self._channel, pct)
         self._apply_value(pct)
         self.schedule_update_ha_state()
@@ -133,16 +134,10 @@ class ZemoteRgbLight(LightEntity):
         self._state      = False
         self._brightness = 255
         self._hs_color: tuple[float, float] = (0, 0)
-        self._r = self._g = self._b = 255
 
     @property
     def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._serial)},
-            name=self._device.get("hubName", self._serial),
-            manufacturer="Contera IoT",
-            model="Zemote Hub",
-        )
+        return _device_info(self._device, self._serial)
 
     @property
     def is_on(self) -> bool:
@@ -171,20 +166,19 @@ class ZemoteRgbLight(LightEntity):
         g = reported.get("G")
         b = reported.get("B")
         if r is not None and g is not None and b is not None:
-            self._r, self._g, self._b = int(r), int(g), int(b)
-            self._state = any([self._r, self._g, self._b])
-            h, s, v = colorsys.rgb_to_hsv(self._r / 255, self._g / 255, self._b / 255)
+            r, g, b = int(r), int(g), int(b)
+            self._state = any([r, g, b])
+            h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
             self._hs_color  = (h * 360, s * 100)
             self._brightness = round(v * 255)
             self.async_write_ha_state()
 
     def turn_on(self, **kwargs: Any) -> None:
-        hs   = kwargs.get(ATTR_HS_COLOR, self._hs_color)
-        bri  = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
+        hs  = kwargs.get(ATTR_HS_COLOR, self._hs_color)
+        bri = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
         h, s = hs[0] / 360, hs[1] / 100
         v    = bri / 255
         r, g, b = [round(c * 255) for c in colorsys.hsv_to_rgb(h, s, v)]
-        self._r, self._g, self._b = r, g, b
         self._state = True
         self._hs_color  = (hs[0], hs[1])
         self._brightness = bri
