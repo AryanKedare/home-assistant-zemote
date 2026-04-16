@@ -1,0 +1,11 @@
+{
+  "domain": "zemote",
+  "name": "Zemote",
+  "version": "1.0.0",
+  "documentation": "https://github.com/AryanKedare/ha-zemote",
+  "requirements": ["boto3>=1.26.0", "paho-mqtt>=1.6.1"],
+  "dependencies": [],
+  "codeowners": ["@AryanKedare"],
+  "iot_class": "cloud_push",
+  "config_flow": true
+}

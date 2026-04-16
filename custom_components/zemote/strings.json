@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Zemote",
+        "description": "Enter your Zemote account credentials.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the Zemote cloud.",
+      "invalid_auth": "Invalid email or password.",
+      "no_devices": "No devices found for this account."
+    },
+    "abort": {
+      "already_configured": "This Zemote account is already configured."
+    }
+  }
+}
