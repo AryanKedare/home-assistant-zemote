@@ -19,6 +19,12 @@ SPEED_STEPS = [1, 3, 5]
 NUM_SPEEDS  = len(SPEED_STEPS)
 
 
+def _strip_room(name: str, room: str) -> str:
+    if room and name.lower().startswith(room.lower()):
+        return name[len(room):].strip()
+    return name
+
+
 def _pct_to_speed(percentage: int) -> int:
     if percentage <= 0:
         return 0
@@ -52,6 +58,7 @@ class ZemoteFan(FanEntity):
     """Represents a Zemote fan — 3 speeds (low/medium/high) via odd shadow values."""
 
     _enable_turn_on_off_backwards_compat = False
+    _attr_has_entity_name = True
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub
@@ -60,7 +67,6 @@ class ZemoteFan(FanEntity):
         self._channel = device["channelKey"]
 
         self._attr_unique_id = f"zemote_{device['applianceId']}"
-        self._attr_name      = device["name"]
         self._attr_supported_features = (
             FanEntityFeature.SET_SPEED
             | FanEntityFeature.TURN_ON
@@ -68,13 +74,15 @@ class ZemoteFan(FanEntity):
         )
         self._attr_speed_count = NUM_SPEEDS
 
-        room = device.get("roomName") or None
+        room = device.get("roomName") or ""
+        self._attr_name = _strip_room(device["name"], room)
+
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
             name=device.get("hubName") or self._serial,
             manufacturer="Zemote",
             model="Hub Module",
-            suggested_area=room,
+            suggested_area=room or None,
         )
 
     @property

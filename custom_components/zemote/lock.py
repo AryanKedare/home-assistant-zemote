@@ -38,6 +38,12 @@ def _is_local_ip(ip_str: str) -> bool:
         return False
 
 
+def _strip_room(name: str, room: str) -> str:
+    if room and name.lower().startswith(room.lower()):
+        return name[len(room):].strip()
+    return name
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -51,26 +57,28 @@ async def async_setup_entry(
 class ZemoteLock(LockEntity):
     """Represents a Zemote standalone lock module."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub    = hub
         self._device = device
         self._serial = device["serialNumber"]
 
         self._attr_unique_id = f"zemote_{device['applianceId']}"
-        self._attr_name      = device["name"]
 
-        room = device.get("roomName") or None
+        room = device.get("roomName") or ""
+        self._attr_name = _strip_room(device["name"], room)
+
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
             name=device.get("hubName") or self._serial,
             manufacturer="Zemote",
             model="Smart Lock",
-            suggested_area=room,
+            suggested_area=room or None,
         )
 
     @property
     def is_locked(self) -> bool:
-        """Return lock state. Defaults to True (locked) until server state is received."""
         state = self._hub.device_states.get(self._serial, {})
         if not state:
             return True
@@ -115,7 +123,6 @@ class ZemoteLock(LockEntity):
         await self.hass.async_add_executor_job(self._request_state)
 
     def _request_state(self) -> None:
-        """Publish to shadow/get to fetch current lock state from AWS IoT."""
         if self._hub._mqtt and self._hub._mqtt.is_connected():
             topic = f"$aws/things/{self._serial}/shadow/get"
             self._hub._mqtt.publish(topic, "", qos=0)

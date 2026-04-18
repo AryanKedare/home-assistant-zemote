@@ -21,6 +21,13 @@ from .const import DOMAIN, SIGNAL_STATE_UPDATED
 _LOGGER = logging.getLogger(__name__)
 
 
+def _strip_room(name: str, room: str) -> str:
+    """Remove leading room prefix from name if present."""
+    if room and name.lower().startswith(room.lower()):
+        return name[len(room):].strip()
+    return name
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -38,6 +45,8 @@ async def async_setup_entry(
 class ZemoteLight(LightEntity):
     """Represents a Zemote light channel."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub
         self._device  = device
@@ -45,7 +54,9 @@ class ZemoteLight(LightEntity):
         self._channel = device["channelKey"]
 
         self._attr_unique_id = f"zemote_{device['applianceId']}"
-        self._attr_name      = device["name"]
+
+        room = device.get("roomName") or ""
+        self._attr_name = _strip_room(device["name"], room)
 
         if device.get("dimmable", True):
             self._attr_color_mode            = ColorMode.BRIGHTNESS
@@ -54,13 +65,12 @@ class ZemoteLight(LightEntity):
             self._attr_color_mode            = ColorMode.ONOFF
             self._attr_supported_color_modes = {ColorMode.ONOFF}
 
-        room = device.get("roomName") or None
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
             name=device.get("hubName") or self._serial,
             manufacturer="Zemote",
             model="Hub Module",
-            suggested_area=room,
+            suggested_area=room or None,
         )
 
     @property

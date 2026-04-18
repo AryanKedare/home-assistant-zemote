@@ -16,6 +16,12 @@ from .const import DOMAIN, SIGNAL_STATE_UPDATED
 _LOGGER = logging.getLogger(__name__)
 
 
+def _strip_room(name: str, room: str) -> str:
+    if room and name.lower().startswith(room.lower()):
+        return name[len(room):].strip()
+    return name
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -38,6 +44,7 @@ class ZemoteCover(CoverEntity):
         | CoverEntityFeature.CLOSE
         | CoverEntityFeature.STOP
     )
+    _attr_has_entity_name = True
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub
@@ -46,15 +53,16 @@ class ZemoteCover(CoverEntity):
         self._channel = device["channelKey"]
 
         self._attr_unique_id = f"zemote_{device['applianceId']}"
-        self._attr_name      = device["name"]
 
-        room = device.get("roomName") or None
+        room = device.get("roomName") or ""
+        self._attr_name = _strip_room(device["name"], room)
+
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
             name=device.get("hubName") or self._serial,
             manufacturer="Zemote",
             model="Hub Module",
-            suggested_area=room,
+            suggested_area=room or None,
         )
 
     @property
