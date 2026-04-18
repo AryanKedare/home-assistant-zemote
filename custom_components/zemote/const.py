@@ -4,7 +4,8 @@ DOMAIN = "zemote"
 
 # Config entry version — bump to force re-discovery when platform logic changes
 # v4: switched MQTT transport from SigV4 WebSocket (port 443) to X.509 TLS (port 8883)
-CONFIG_VERSION = 4
+# v5: entity names now use room + raw_name only (no hub/module name prefix)
+CONFIG_VERSION = 5
 
 # AWS
 AWS_REGION_COGNITO = "ap-southeast-1"
