@@ -62,6 +62,7 @@ class ZemoteLight(LightEntity):
             manufacturer="Zemote",
             model="Hub Module",
             suggested_area=device.get("roomName") or None,
+            via_device=(DOMAIN, self._serial),
         )
 
     @property
