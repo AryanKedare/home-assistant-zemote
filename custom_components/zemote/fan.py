@@ -19,12 +19,6 @@ SPEED_STEPS = [1, 3, 5]
 NUM_SPEEDS  = len(SPEED_STEPS)
 
 
-def _strip_room(name: str, room: str) -> str:
-    if room and name.lower().startswith(room.lower()):
-        return name[len(room):].strip()
-    return name
-
-
 def _pct_to_speed(percentage: int) -> int:
     if percentage <= 0:
         return 0
@@ -73,10 +67,9 @@ class ZemoteFan(FanEntity):
             | FanEntityFeature.TURN_OFF
         )
         self._attr_speed_count = NUM_SPEEDS
+        self._attr_name = device["name"]
 
         room = device.get("roomName") or ""
-        self._attr_name = _strip_room(device["name"], room)
-
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
             name=device.get("hubName") or self._serial,

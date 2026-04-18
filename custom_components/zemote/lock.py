@@ -38,12 +38,6 @@ def _is_local_ip(ip_str: str) -> bool:
         return False
 
 
-def _strip_room(name: str, room: str) -> str:
-    if room and name.lower().startswith(room.lower()):
-        return name[len(room):].strip()
-    return name
-
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -57,7 +51,7 @@ async def async_setup_entry(
 class ZemoteLock(LockEntity):
     """Represents a Zemote standalone lock module."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub    = hub
@@ -65,10 +59,9 @@ class ZemoteLock(LockEntity):
         self._serial = device["serialNumber"]
 
         self._attr_unique_id = f"zemote_{device['applianceId']}"
+        self._attr_name = device["name"]
 
         room = device.get("roomName") or ""
-        self._attr_name = _strip_room(device["name"], room)
-
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
             name=device.get("hubName") or self._serial,
