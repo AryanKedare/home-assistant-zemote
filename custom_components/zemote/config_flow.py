@@ -166,7 +166,6 @@ def _fetch_account_data(email: str) -> dict:
     modules = module_resp.get("Items", [])
 
     rooms = _scan_all(dynamo.Table(TABLE_ROOM), Attr("email").eq(email))
-    _LOGGER.debug("Zemote: fetched %d rooms for %s", len(rooms), email)
 
     appliance_room: dict[str, str] = {}
     room_list: list[dict] = []
@@ -181,8 +180,6 @@ def _fetch_account_data(email: str) -> dict:
             aid = aid.strip()
             if aid and aid not in appliance_room:
                 appliance_room[aid] = room_name
-
-    _LOGGER.info("Zemote: built appliance->room map with %d entries", len(appliance_room))
 
     devices: list[dict] = []
     seen_ids: set[str] = set()
@@ -203,7 +200,7 @@ def _fetch_account_data(email: str) -> dict:
             seen_ids.add(sub_id)
             platform, dimmable = _classify_lfm(sub_type, dimmable_status)
             room = appliance_room.get(sub_id, "")
-            _LOGGER.info(
+            _LOGGER.warning(
                 "Zemote DEBUG lfm: serial=%r hub_name=%r room=%r raw_name=%r",
                 serial, hub_name, room, raw_name,
             )
