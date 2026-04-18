@@ -52,7 +52,7 @@ class ZemoteFan(FanEntity):
     """Represents a Zemote fan — 3 speeds (low/medium/high) via odd shadow values."""
 
     _enable_turn_on_off_backwards_compat = False
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub
@@ -67,15 +67,14 @@ class ZemoteFan(FanEntity):
             | FanEntityFeature.TURN_OFF
         )
         self._attr_speed_count = NUM_SPEEDS
-        self._attr_name = device["name"]
+        self._attr_name = None
 
-        room = device.get("roomName") or ""
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._serial)},
-            name=device.get("hubName") or self._serial,
+            identifiers={(DOMAIN, device["applianceId"])},
+            name=device["name"],
             manufacturer="Zemote",
             model="Hub Module",
-            suggested_area=room or None,
+            suggested_area=device.get("roomName") or None,
         )
 
     @property
