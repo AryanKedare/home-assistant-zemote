@@ -33,7 +33,7 @@ async def async_setup_entry(
 class ZemoteSwitch(SwitchEntity):
     """Represents a Zemote switch channel."""
 
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub

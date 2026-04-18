@@ -139,13 +139,6 @@ def _scan_all(table, filter_expr) -> list[dict]:
     return items
 
 
-def _build_name(room: str, raw_name: str) -> str:
-    """Prefix raw_name with room if not already present."""
-    if room and not raw_name.startswith(room):
-        return f"{room} {raw_name}"
-    return raw_name
-
-
 def _fetch_account_data(email: str) -> dict:
     cognito = boto3.client("cognito-identity", region_name=AWS_REGION_COGNITO)
     identity_id = cognito.get_id(IdentityPoolId=IDENTITY_POOL_ID)["IdentityId"]
@@ -211,7 +204,7 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _build_name(room, raw_name),
+                "name": raw_name,
                 "channelKey": sub_type,
                 "dimmable": dimmable,
                 "platform": platform,
@@ -231,7 +224,7 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _build_name(room, raw_name),
+                "name": raw_name,
                 "channelKey": sub_type,
                 "dimmable": False,
                 "platform": "switch",
@@ -251,7 +244,7 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _build_name(room, raw_name),
+                "name": raw_name,
                 "channelKey": sub_type,
                 "dimmable": False,
                 "platform": "cover",
@@ -272,7 +265,7 @@ def _fetch_account_data(email: str) -> dict:
                         "applianceId": sur_id,
                         "moduleId": appliance_id,
                         "serialNumber": serial,
-                        "name": _build_name(room, raw_name),
+                        "name": raw_name,
                         "channelKey": sur_type,
                         "dimmable": False,
                         "platform": SUR_TYPE_MAP.get(sur_type, "switch"),
@@ -293,7 +286,7 @@ def _fetch_account_data(email: str) -> dict:
                     "applianceId": rgb_id,
                     "moduleId": appliance_id,
                     "serialNumber": serial,
-                    "name": _build_name(room, raw_name),
+                    "name": raw_name,
                     "channelKey": rgb.get("type", "RGB"),
                     "dimmable": True,
                     "platform": "light",
