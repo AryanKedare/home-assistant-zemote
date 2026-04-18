@@ -58,7 +58,7 @@ class ZemoteFan(FanEntity):
     """Represents a Zemote fan — 3 speeds (low/medium/high) via odd shadow values."""
 
     _enable_turn_on_off_backwards_compat = False
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub
