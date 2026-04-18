@@ -203,6 +203,10 @@ def _fetch_account_data(email: str) -> dict:
             seen_ids.add(sub_id)
             platform, dimmable = _classify_lfm(sub_type, dimmable_status)
             room = appliance_room.get(sub_id, "")
+            _LOGGER.info(
+                "Zemote DEBUG lfm: serial=%r hub_name=%r room=%r raw_name=%r",
+                serial, hub_name, room, raw_name,
+            )
             devices.append({
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
