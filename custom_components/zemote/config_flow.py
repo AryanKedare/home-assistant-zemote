@@ -36,19 +36,26 @@ STEP_USER_SCHEMA = vol.Schema({
 })
 
 
-def _strip_hub_prefix(name: str, hub_name: str) -> str:
-    """Strip hub name prefix from device name if present.
+def _strip_module_token(name: str, hub_name: str) -> str:
+    """Strip the module identifier token (last word of hub_name) from the
+    start of name if present.
 
-    e.g. hub_name='SB3', name='SB3 Bar' -> 'Bar'
-         hub_name='Module A', name='Module A Fan' -> 'Fan'
+    e.g. hub_name='Child Bedroom SB3', name='SB3 Bar' -> 'Bar'
+         hub_name='Children SB2',      name='SB2 Fan' -> 'Fan'
+         hub_name='Child Bedroom 1595', name='1595 Entrance' -> 'Entrance'
     """
-    if hub_name and name.lower().startswith(hub_name.lower()):
-        return name[len(hub_name):].strip()
+    if not hub_name:
+        return name
+    token = hub_name.split()[-1]  # last word of hub name, e.g. 'SB3', '1595'
+    if name.lower().startswith(token.lower()):
+        stripped = name[len(token):].strip()
+        if stripped:  # don't return empty string
+            return stripped
     return name
 
 
 def _prefixed_name(room: str, name: str, hub_name: str = "") -> str:
-    clean = _strip_hub_prefix(name, hub_name)
+    clean = _strip_module_token(name, hub_name)
     if room:
         return f"{room} {clean}"
     return clean
