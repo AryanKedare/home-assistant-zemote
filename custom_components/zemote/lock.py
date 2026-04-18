@@ -2,6 +2,7 @@
 
 Unlock is restricted to local network requests only.
 Lock modules use custom ST/SC payloads instead of normal channel values.
+Default state is locked (fail-safe) until real state is fetched from server.
 """
 from __future__ import annotations
 
@@ -61,15 +62,22 @@ class ZemoteLock(LockEntity):
             self._attr_suggested_area = room
 
     @property
-    def is_locked(self) -> bool | None:
+    def is_locked(self) -> bool:
+        """Return lock state. Defaults to True (locked) until server state is received."""
         state = self._hub.device_states.get(self._serial, {})
+        if not state:
+            # No shadow state yet — default to locked (fail-safe)
+            return True
         st = str(state.get("ST", "")).lower()
         sc = str(state.get("SC", "")).lower()
-        if st in {"on", "ok"} and sc != "ok":
+        # ST=on/ok  means lock motor engaged — locked
+        if st in {"on", "ok"} and sc not in {"on", "ok"}:
             return True
+        # SC=on/ok means unlock motor engaged — unlocked
         if sc in {"on", "ok"} or st == "off":
             return False
-        return None
+        # Fallback — default locked
+        return True
 
     async def async_lock(self, **kwargs: Any) -> None:
         self._hub.publish(self._serial, {"SC": "off", "ST": "on"})
@@ -104,6 +112,15 @@ class ZemoteLock(LockEntity):
         room = self._device.get("roomName")
         if room:
             await self._async_assign_area(room)
+        # Request fresh state from Zemote server immediately on startup
+        await self.hass.async_add_executor_job(self._request_state)
+
+    def _request_state(self) -> None:
+        """Publish to shadow/get to fetch current lock state from AWS IoT."""
+        if self._hub._mqtt and self._hub._mqtt.is_connected():
+            topic = f"$aws/things/{self._serial}/shadow/get"
+            self._hub._mqtt.publish(topic, "", qos=0)
+            _LOGGER.debug("Zemote lock: requested shadow state for %s", self._serial)
 
     async def _async_assign_area(self, room_name: str) -> None:
         from homeassistant.helpers import area_registry as ar, device_registry as dr
