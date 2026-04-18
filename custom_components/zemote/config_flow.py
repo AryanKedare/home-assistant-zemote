@@ -36,6 +36,13 @@ STEP_USER_SCHEMA = vol.Schema({
 })
 
 
+def _strip_module_prefix(name: str, hub_name: str) -> str:
+    """Strip the module/hub name prefix from a device name."""
+    if hub_name and name.lower().startswith(hub_name.lower()):
+        name = name[len(hub_name):].strip()
+    return name or name
+
+
 class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle the Zemote config flow."""
 
@@ -193,7 +200,7 @@ def _fetch_account_data(email: str) -> dict:
         for item in mod.get("lfmData") or []:
             sub_id = item.get("applianceId", "")
             sub_type = item.get("type", "")
-            raw_name = item.get("name") or sub_id
+            raw_name = _strip_module_prefix(item.get("name") or sub_id, hub_name)
             dimmable_status = item.get("dimmableStatus", "")
             if not sub_id or not sub_type or sub_type.upper() == DIMMER_NA or sub_id in seen_ids:
                 continue
@@ -215,7 +222,7 @@ def _fetch_account_data(email: str) -> dict:
         for item in mod.get("powerModuleData") or []:
             sub_id = item.get("applianceId", "")
             sub_type = item.get("type", "")
-            raw_name = item.get("name") or sub_id
+            raw_name = _strip_module_prefix(item.get("name") or sub_id, hub_name)
             if not sub_id or not sub_type or sub_type.upper() == DIMMER_NA or sub_id in seen_ids:
                 continue
             seen_ids.add(sub_id)
@@ -235,7 +242,7 @@ def _fetch_account_data(email: str) -> dict:
         for item in mod.get("curtainData") or []:
             sub_id = item.get("applianceId", "")
             sub_type = item.get("type", "")
-            raw_name = item.get("name") or sub_id
+            raw_name = _strip_module_prefix(item.get("name") or sub_id, hub_name)
             if not sub_id or not sub_type or sub_type.upper() == DIMMER_NA or sub_id in seen_ids:
                 continue
             seen_ids.add(sub_id)
@@ -256,7 +263,7 @@ def _fetch_account_data(email: str) -> dict:
         if sur:
             sur_type = sur.get("type", "").upper()
             sur_id = sur.get("applianceId") or appliance_id
-            raw_name = sur.get("name") or sur_id
+            raw_name = _strip_module_prefix(sur.get("name") or sur_id, hub_name)
             if sur_type and sur_type != DIMMER_NA and raw_name != DIMMER_NA:
                 if sur_id and sur_id not in seen_ids:
                     seen_ids.add(sur_id)
@@ -278,7 +285,7 @@ def _fetch_account_data(email: str) -> dict:
         rgb = mod.get("rgbData")
         if rgb:
             rgb_id = rgb.get("applianceId") or appliance_id
-            raw_name = rgb.get("name") or rgb_id
+            raw_name = _strip_module_prefix(rgb.get("name") or rgb_id, hub_name)
             if rgb_id and rgb_id not in seen_ids:
                 seen_ids.add(rgb_id)
                 room = appliance_room.get(rgb_id, "")
