@@ -47,7 +47,6 @@ async def _load_or_create_cert(hass: HomeAssistant, creds: dict, region: str) ->
     if cert_data:
         _LOGGER.debug("Zemote: loaded existing X.509 cert from storage")
         return cert_data
-
     _LOGGER.info("Zemote: creating new X.509 certificate via AWS IoT...")
     cert_data = await hass.async_add_executor_job(_create_cert, creds, region)
     await store.async_save(cert_data)
@@ -220,9 +219,18 @@ class ZemoteHub:
             state = outer.get("state", {})
             if isinstance(state, str):
                 state = json.loads(state)
+
             reported = state.get("reported", {})
             if isinstance(reported, str):
                 reported = json.loads(reported)
+
+            # Skip messages that carry no reported state — these are just AWS IoT
+            # echoing back our desired payload. Acting on them would corrupt state.
+            if not reported:
+                _LOGGER.debug("Zemote: skipping no-reported message on %s", serial)
+                return
+
+            _LOGGER.debug("Zemote shadow %s -> %s", serial, reported)
             self.device_states[serial] = {
                 **self.device_states.get(serial, {}),
                 **reported,
