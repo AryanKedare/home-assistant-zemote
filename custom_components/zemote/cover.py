@@ -50,10 +50,10 @@ class ZemoteCover(CoverEntity):
 
         room = device.get("roomName") or None
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, device["applianceId"])},
-            name=device.get("hubName") or device["name"],
+            identifiers={(DOMAIN, self._serial)},
+            name=device.get("hubName") or self._serial,
             manufacturer="Zemote",
-            model="Cover",
+            model="Hub Module",
             suggested_area=room,
         )
 

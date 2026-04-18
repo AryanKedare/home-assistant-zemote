@@ -56,10 +56,10 @@ class ZemoteLight(LightEntity):
 
         room = device.get("roomName") or None
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, device["applianceId"])},
-            name=device.get("hubName") or device["name"],
+            identifiers={(DOMAIN, self._serial)},
+            name=device.get("hubName") or self._serial,
             manufacturer="Zemote",
-            model="Light",
+            model="Hub Module",
             suggested_area=room,
         )
 
