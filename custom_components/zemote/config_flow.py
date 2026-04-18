@@ -36,29 +36,11 @@ STEP_USER_SCHEMA = vol.Schema({
 })
 
 
-def _strip_module_token(name: str, hub_name: str) -> str:
-    """Strip the module identifier token (last word of hub_name) from the
-    start of name if present.
-
-    e.g. hub_name='Child Bedroom SB3', name='SB3 Bar' -> 'Bar'
-         hub_name='Children SB2',      name='SB2 Fan' -> 'Fan'
-         hub_name='Child Bedroom 1595', name='1595 Entrance' -> 'Entrance'
-    """
-    if not hub_name:
-        return name
-    token = hub_name.split()[-1]  # last word of hub name, e.g. 'SB3', '1595'
-    if name.lower().startswith(token.lower()):
-        stripped = name[len(token):].strip()
-        if stripped:  # don't return empty string
-            return stripped
-    return name
-
-
-def _prefixed_name(room: str, name: str, hub_name: str = "") -> str:
-    clean = _strip_module_token(name, hub_name)
+def _build_name(room: str, raw_name: str) -> str:
+    """Build entity name as 'Room RawName', or just RawName if no room."""
     if room:
-        return f"{room} {clean}"
-    return clean
+        return f"{room} {raw_name}"
+    return raw_name
 
 
 class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -232,7 +214,7 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _prefixed_name(room, raw_name, hub_name),
+                "name": _build_name(room, raw_name),
                 "channelKey": sub_type,
                 "dimmable": dimmable,
                 "platform": platform,
@@ -252,7 +234,7 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _prefixed_name(room, raw_name, hub_name),
+                "name": _build_name(room, raw_name),
                 "channelKey": sub_type,
                 "dimmable": False,
                 "platform": "switch",
@@ -272,7 +254,7 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _prefixed_name(room, raw_name, hub_name),
+                "name": _build_name(room, raw_name),
                 "channelKey": sub_type,
                 "dimmable": False,
                 "platform": "cover",
@@ -293,7 +275,7 @@ def _fetch_account_data(email: str) -> dict:
                         "applianceId": sur_id,
                         "moduleId": appliance_id,
                         "serialNumber": serial,
-                        "name": _prefixed_name(room, raw_name, hub_name),
+                        "name": _build_name(room, raw_name),
                         "channelKey": sur_type,
                         "dimmable": False,
                         "platform": SUR_TYPE_MAP.get(sur_type, "switch"),
@@ -314,7 +296,7 @@ def _fetch_account_data(email: str) -> dict:
                     "applianceId": rgb_id,
                     "moduleId": appliance_id,
                     "serialNumber": serial,
-                    "name": _prefixed_name(room, raw_name, hub_name),
+                    "name": _build_name(room, raw_name),
                     "channelKey": rgb.get("type", "RGB"),
                     "dimmable": True,
                     "platform": "light",
@@ -340,7 +322,7 @@ def _fetch_account_data(email: str) -> dict:
             "applianceId": appliance_id,
             "moduleId": appliance_id,
             "serialNumber": serial,
-            "name": _prefixed_name(room, raw_name),
+            "name": _build_name(room, raw_name),
             "channelKey": "LOCK",
             "dimmable": False,
             "platform": "lock",
