@@ -38,7 +38,7 @@ async def async_setup_entry(
 class ZemoteLight(LightEntity):
     """Represents a Zemote light channel."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub
@@ -47,7 +47,7 @@ class ZemoteLight(LightEntity):
         self._channel = device["channelKey"]
 
         self._attr_unique_id = f"zemote_{device['applianceId']}"
-        self._attr_name = device.get("rawName") or device["name"]
+        self._attr_name = device["name"]
 
         if device.get("dimmable", True):
             self._attr_color_mode            = ColorMode.BRIGHTNESS
@@ -59,7 +59,7 @@ class ZemoteLight(LightEntity):
         room = device.get("roomName") or ""
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
-            name=device.get("roomName") or device.get("hubName") or self._serial,
+            name=device.get("hubName") or self._serial,
             manufacturer="Zemote",
             model="Hub Module",
             suggested_area=room or None,
