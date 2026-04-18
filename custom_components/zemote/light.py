@@ -38,7 +38,7 @@ async def async_setup_entry(
 class ZemoteLight(LightEntity):
     """Represents a Zemote light channel."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub
