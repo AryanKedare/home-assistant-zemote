@@ -36,13 +36,6 @@ STEP_USER_SCHEMA = vol.Schema({
 })
 
 
-def _build_name(room: str, raw_name: str) -> str:
-    """Build entity name as 'Room RawName', or just RawName if no room."""
-    if room:
-        return f"{room} {raw_name}"
-    return raw_name
-
-
 class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle the Zemote config flow."""
 
@@ -214,7 +207,8 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _build_name(room, raw_name),
+                "name": f"{room} {raw_name}".strip() if room else raw_name,
+                "rawName": raw_name,
                 "channelKey": sub_type,
                 "dimmable": dimmable,
                 "platform": platform,
@@ -234,7 +228,8 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _build_name(room, raw_name),
+                "name": f"{room} {raw_name}".strip() if room else raw_name,
+                "rawName": raw_name,
                 "channelKey": sub_type,
                 "dimmable": False,
                 "platform": "switch",
@@ -254,7 +249,8 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _build_name(room, raw_name),
+                "name": f"{room} {raw_name}".strip() if room else raw_name,
+                "rawName": raw_name,
                 "channelKey": sub_type,
                 "dimmable": False,
                 "platform": "cover",
@@ -275,7 +271,8 @@ def _fetch_account_data(email: str) -> dict:
                         "applianceId": sur_id,
                         "moduleId": appliance_id,
                         "serialNumber": serial,
-                        "name": _build_name(room, raw_name),
+                        "name": f"{room} {raw_name}".strip() if room else raw_name,
+                        "rawName": raw_name,
                         "channelKey": sur_type,
                         "dimmable": False,
                         "platform": SUR_TYPE_MAP.get(sur_type, "switch"),
@@ -296,7 +293,8 @@ def _fetch_account_data(email: str) -> dict:
                     "applianceId": rgb_id,
                     "moduleId": appliance_id,
                     "serialNumber": serial,
-                    "name": _build_name(room, raw_name),
+                    "name": f"{room} {raw_name}".strip() if room else raw_name,
+                    "rawName": raw_name,
                     "channelKey": rgb.get("type", "RGB"),
                     "dimmable": True,
                     "platform": "light",
@@ -322,7 +320,8 @@ def _fetch_account_data(email: str) -> dict:
             "applianceId": appliance_id,
             "moduleId": appliance_id,
             "serialNumber": serial,
-            "name": _build_name(room, raw_name),
+            "name": f"{room} {raw_name}".strip() if room else raw_name,
+            "rawName": raw_name,
             "channelKey": "LOCK",
             "dimmable": False,
             "platform": "lock",

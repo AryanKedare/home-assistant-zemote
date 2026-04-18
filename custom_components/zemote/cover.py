@@ -38,7 +38,7 @@ class ZemoteCover(CoverEntity):
         | CoverEntityFeature.CLOSE
         | CoverEntityFeature.STOP
     )
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub
@@ -47,12 +47,12 @@ class ZemoteCover(CoverEntity):
         self._channel = device["channelKey"]
 
         self._attr_unique_id = f"zemote_{device['applianceId']}"
-        self._attr_name = device["name"]
+        self._attr_name = device.get("rawName") or device["name"]
 
         room = device.get("roomName") or ""
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
-            name=device.get("hubName") or self._serial,
+            name=device.get("roomName") or device.get("hubName") or self._serial,
             manufacturer="Zemote",
             model="Hub Module",
             suggested_area=room or None,
