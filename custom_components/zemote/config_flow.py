@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import boto3
@@ -34,6 +35,14 @@ STEP_USER_SCHEMA = vol.Schema({
     vol.Required("email"): str,
     vol.Required("password"): str,
 })
+
+# Matches module prefixes like "SB1 ", "SB2 ", "SB3 ", "SB12 " etc.
+_MODULE_PREFIX_RE = re.compile(r"^SB\d+\s+", re.IGNORECASE)
+
+
+def _strip_module_prefix(name: str) -> str:
+    """Strip hardware module prefix e.g. 'SB3 Fan 2' -> 'Fan 2'."""
+    return _MODULE_PREFIX_RE.sub("", name).strip()
 
 
 class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -127,9 +136,10 @@ def _classify_lfm(sub_type: str, dimmable_status: str) -> tuple[str, bool]:
 
 
 def _prefixed_name(room: str, name: str) -> str:
+    clean = _strip_module_prefix(name)
     if room:
-        return f"{room} {name}"
-    return name
+        return f"{room} {clean}"
+    return clean
 
 
 def _scan_all(table, filter_expr) -> list[dict]:
