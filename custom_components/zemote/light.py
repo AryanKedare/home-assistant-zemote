@@ -13,6 +13,7 @@ from homeassistant.components.light import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, SIGNAL_STATE_UPDATED
@@ -53,9 +54,14 @@ class ZemoteLight(LightEntity):
             self._attr_color_mode            = ColorMode.ONOFF
             self._attr_supported_color_modes = {ColorMode.ONOFF}
 
-        room = device.get("roomName")
-        if room:
-            self._attr_suggested_area = room
+        room = device.get("roomName") or None
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device["applianceId"])},
+            name=device.get("hubName") or device["name"],
+            manufacturer="Zemote",
+            model="Light",
+            suggested_area=room,
+        )
 
     @property
     def is_on(self) -> bool:
@@ -94,24 +100,6 @@ class ZemoteLight(LightEntity):
                 self._handle_update,
             )
         )
-        # Assign area via device registry — works even for existing entities
-        room = self._device.get("roomName")
-        if room:
-            await self._async_assign_area(room)
-
-    async def _async_assign_area(self, room_name: str) -> None:
-        """Look up or create the area and assign this device to it."""
-        from homeassistant.helpers import area_registry as ar, device_registry as dr
-        area_reg   = ar.async_get(self.hass)
-        device_reg = dr.async_get(self.hass)
-
-        area = area_reg.async_get_area_by_name(room_name)
-        if area is None:
-            area = area_reg.async_create(room_name)
-
-        device = device_reg.async_get_device(identifiers={(DOMAIN, self._attr_unique_id)})
-        if device and device.area_id != area.id:
-            device_reg.async_update_device(device.id, area_id=area.id)
 
     @callback
     def _handle_update(self, reported: dict) -> None:

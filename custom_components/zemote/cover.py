@@ -8,6 +8,7 @@ from homeassistant.components.cover import CoverEntity, CoverEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, SIGNAL_STATE_UPDATED
@@ -47,9 +48,14 @@ class ZemoteCover(CoverEntity):
         self._attr_unique_id = f"zemote_{device['applianceId']}"
         self._attr_name      = device["name"]
 
-        room = device.get("roomName")
-        if room:
-            self._attr_suggested_area = room
+        room = device.get("roomName") or None
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device["applianceId"])},
+            name=device.get("hubName") or device["name"],
+            manufacturer="Zemote",
+            model="Cover",
+            suggested_area=room,
+        )
 
     @property
     def is_closed(self) -> bool | None:

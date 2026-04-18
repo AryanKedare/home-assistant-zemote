@@ -8,37 +8,29 @@ from homeassistant.components.fan import FanEntity, FanEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.util.percentage import int_states_in_range
 
 from .const import DOMAIN, SIGNAL_STATE_UPDATED
 
 _LOGGER = logging.getLogger(__name__)
 
-# Zemote firmware only responds to odd speed values: 0=off, 1=low, 3=medium, 5=high
-# Even values (2, 4) are treated as off by the device firmware.
-# We expose 3 discrete steps mapped to shadow values 1, 3, 5.
-SPEED_STEPS = [1, 3, 5]   # actual shadow values sent to device
-NUM_SPEEDS   = len(SPEED_STEPS)  # = 3
+SPEED_STEPS = [1, 3, 5]
+NUM_SPEEDS  = len(SPEED_STEPS)
 
 
 def _pct_to_speed(percentage: int) -> int:
-    """Map 1-100% to the nearest odd speed step (1, 3, 5)."""
     if percentage <= 0:
         return 0
-    # Divide range into 3 equal buckets
     idx = min(NUM_SPEEDS - 1, int((percentage - 1) * NUM_SPEEDS / 100))
     return SPEED_STEPS[idx]
 
 
 def _speed_to_pct(speed: int) -> int:
-    """Map shadow speed value back to percentage for HA display."""
     if speed <= 0:
         return 0
-    # Find nearest step
     nearest = min(SPEED_STEPS, key=lambda s: abs(s - speed))
     idx = SPEED_STEPS.index(nearest)
-    # Return midpoint of the bucket
     return round((idx + 1) * 100 / NUM_SPEEDS)
 
 
@@ -74,11 +66,16 @@ class ZemoteFan(FanEntity):
             | FanEntityFeature.TURN_ON
             | FanEntityFeature.TURN_OFF
         )
-        self._attr_speed_count = NUM_SPEEDS  # 3
+        self._attr_speed_count = NUM_SPEEDS
 
-        room = device.get("roomName")
-        if room:
-            self._attr_suggested_area = room
+        room = device.get("roomName") or None
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device["applianceId"])},
+            name=device.get("hubName") or device["name"],
+            manufacturer="Zemote",
+            model="Fan",
+            suggested_area=room,
+        )
 
     @property
     def is_on(self) -> bool:
@@ -124,24 +121,6 @@ class ZemoteFan(FanEntity):
                 self._handle_update,
             )
         )
-        # Assign area via device registry — works even for existing entities
-        room = self._device.get("roomName")
-        if room:
-            await self._async_assign_area(room)
-
-    async def _async_assign_area(self, room_name: str) -> None:
-        """Look up or create the area and assign this device to it."""
-        from homeassistant.helpers import area_registry as ar, device_registry as dr
-        area_reg  = ar.async_get(self.hass)
-        device_reg = dr.async_get(self.hass)
-
-        area = area_reg.async_get_area_by_name(room_name)
-        if area is None:
-            area = area_reg.async_create(room_name)
-
-        device = device_reg.async_get_device(identifiers={(DOMAIN, self._attr_unique_id)})
-        if device and device.area_id != area.id:
-            device_reg.async_update_device(device.id, area_id=area.id)
 
     @callback
     def _handle_update(self, reported: dict) -> None:

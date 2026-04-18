@@ -14,6 +14,7 @@ from homeassistant.components.lock import LockEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, SIGNAL_STATE_UPDATED
@@ -51,32 +52,34 @@ class ZemoteLock(LockEntity):
     """Represents a Zemote standalone lock module."""
 
     def __init__(self, hub: Any, device: dict) -> None:
-        self._hub = hub
+        self._hub    = hub
         self._device = device
         self._serial = device["serialNumber"]
-        self._attr_unique_id = f"zemote_{device['applianceId']}"
-        self._attr_name = device["name"]
 
-        room = device.get("roomName")
-        if room:
-            self._attr_suggested_area = room
+        self._attr_unique_id = f"zemote_{device['applianceId']}"
+        self._attr_name      = device["name"]
+
+        room = device.get("roomName") or None
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device["applianceId"])},
+            name=device.get("hubName") or device["name"],
+            manufacturer="Zemote",
+            model="Smart Lock",
+            suggested_area=room,
+        )
 
     @property
     def is_locked(self) -> bool:
         """Return lock state. Defaults to True (locked) until server state is received."""
         state = self._hub.device_states.get(self._serial, {})
         if not state:
-            # No shadow state yet — default to locked (fail-safe)
             return True
         st = str(state.get("ST", "")).lower()
         sc = str(state.get("SC", "")).lower()
-        # ST=on/ok  means lock motor engaged — locked
         if st in {"on", "ok"} and sc not in {"on", "ok"}:
             return True
-        # SC=on/ok means unlock motor engaged — unlocked
         if sc in {"on", "ok"} or st == "off":
             return False
-        # Fallback — default locked
         return True
 
     async def async_lock(self, **kwargs: Any) -> None:
@@ -109,10 +112,6 @@ class ZemoteLock(LockEntity):
                 self._handle_update,
             )
         )
-        room = self._device.get("roomName")
-        if room:
-            await self._async_assign_area(room)
-        # Request fresh state from Zemote server immediately on startup
         await self.hass.async_add_executor_job(self._request_state)
 
     def _request_state(self) -> None:
@@ -121,19 +120,6 @@ class ZemoteLock(LockEntity):
             topic = f"$aws/things/{self._serial}/shadow/get"
             self._hub._mqtt.publish(topic, "", qos=0)
             _LOGGER.debug("Zemote lock: requested shadow state for %s", self._serial)
-
-    async def _async_assign_area(self, room_name: str) -> None:
-        from homeassistant.helpers import area_registry as ar, device_registry as dr
-        area_reg = ar.async_get(self.hass)
-        device_reg = dr.async_get(self.hass)
-
-        area = area_reg.async_get_area_by_name(room_name)
-        if area is None:
-            area = area_reg.async_create(room_name)
-
-        device = device_reg.async_get_device(identifiers={(DOMAIN, self._attr_unique_id)})
-        if device and device.area_id != area.id:
-            device_reg.async_update_device(device.id, area_id=area.id)
 
     @callback
     def _handle_update(self, reported: dict) -> None:
