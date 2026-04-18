@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 import boto3
@@ -36,13 +35,23 @@ STEP_USER_SCHEMA = vol.Schema({
     vol.Required("password"): str,
 })
 
-# Matches module prefixes like "SB1 ", "SB2 ", "SB3 ", "SB12 " etc.
-_MODULE_PREFIX_RE = re.compile(r"^SB\d+\s+", re.IGNORECASE)
+
+def _strip_hub_prefix(name: str, hub_name: str) -> str:
+    """Strip hub name prefix from device name if present.
+
+    e.g. hub_name='SB3', name='SB3 Bar' -> 'Bar'
+         hub_name='Module A', name='Module A Fan' -> 'Fan'
+    """
+    if hub_name and name.lower().startswith(hub_name.lower()):
+        return name[len(hub_name):].strip()
+    return name
 
 
-def _strip_module_prefix(name: str) -> str:
-    """Strip hardware module prefix e.g. 'SB3 Fan 2' -> 'Fan 2'."""
-    return _MODULE_PREFIX_RE.sub("", name).strip()
+def _prefixed_name(room: str, name: str, hub_name: str = "") -> str:
+    clean = _strip_hub_prefix(name, hub_name)
+    if room:
+        return f"{room} {clean}"
+    return clean
 
 
 class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -135,13 +144,6 @@ def _classify_lfm(sub_type: str, dimmable_status: str) -> tuple[str, bool]:
     return "switch", False
 
 
-def _prefixed_name(room: str, name: str) -> str:
-    clean = _strip_module_prefix(name)
-    if room:
-        return f"{room} {clean}"
-    return clean
-
-
 def _scan_all(table, filter_expr) -> list[dict]:
     items = []
     kwargs = {"FilterExpression": filter_expr}
@@ -223,7 +225,7 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _prefixed_name(room, raw_name),
+                "name": _prefixed_name(room, raw_name, hub_name),
                 "channelKey": sub_type,
                 "dimmable": dimmable,
                 "platform": platform,
@@ -243,7 +245,7 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _prefixed_name(room, raw_name),
+                "name": _prefixed_name(room, raw_name, hub_name),
                 "channelKey": sub_type,
                 "dimmable": False,
                 "platform": "switch",
@@ -263,7 +265,7 @@ def _fetch_account_data(email: str) -> dict:
                 "applianceId": sub_id,
                 "moduleId": appliance_id,
                 "serialNumber": serial,
-                "name": _prefixed_name(room, raw_name),
+                "name": _prefixed_name(room, raw_name, hub_name),
                 "channelKey": sub_type,
                 "dimmable": False,
                 "platform": "cover",
@@ -284,7 +286,7 @@ def _fetch_account_data(email: str) -> dict:
                         "applianceId": sur_id,
                         "moduleId": appliance_id,
                         "serialNumber": serial,
-                        "name": _prefixed_name(room, raw_name),
+                        "name": _prefixed_name(room, raw_name, hub_name),
                         "channelKey": sur_type,
                         "dimmable": False,
                         "platform": SUR_TYPE_MAP.get(sur_type, "switch"),
@@ -305,7 +307,7 @@ def _fetch_account_data(email: str) -> dict:
                     "applianceId": rgb_id,
                     "moduleId": appliance_id,
                     "serialNumber": serial,
-                    "name": _prefixed_name(room, raw_name),
+                    "name": _prefixed_name(room, raw_name, hub_name),
                     "channelKey": rgb.get("type", "RGB"),
                     "dimmable": True,
                     "platform": "light",
