@@ -37,10 +37,18 @@ STEP_USER_SCHEMA = vol.Schema({
 
 
 def _strip_module_prefix(name: str, hub_name: str) -> str:
-    """Strip the module/hub name prefix from a device name."""
-    if hub_name and name.lower().startswith(hub_name.lower()):
-        name = name[len(hub_name):].strip()
-    return name or name
+    """Strip the hub name prefix from a device name.
+
+    The raw name in DynamoDB is stored as '<hub_name> <device_label>'
+    e.g. 'Children SB2 Fan'. We want only 'Fan'.
+    Strips leading/trailing whitespace before comparing to handle any
+    inconsistent spacing in the DB values.
+    """
+    stripped = name.strip()
+    prefix = hub_name.strip() if hub_name else ""
+    if prefix and stripped.lower().startswith(prefix.lower()):
+        stripped = stripped[len(prefix):].strip()
+    return stripped if stripped else name.strip()
 
 
 class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
