@@ -7,7 +7,6 @@ import ssl
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 
 import boto3
@@ -32,10 +31,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-CERT_STORAGE_KEY     = f"{DOMAIN}_cert"
+CERT_STORAGE_KEY = f"{DOMAIN}_cert"
 CERT_STORAGE_VERSION = 1
 
-# paho 2.x requires CallbackAPIVersion
 try:
     from paho.mqtt.client import CallbackAPIVersion
     _PAHO_V2 = True
@@ -43,34 +41,21 @@ except ImportError:
     _PAHO_V2 = False
 
 
-# ------------------------------------------------------------------ #
-# Certificate management
-# ------------------------------------------------------------------ #
-
 async def _load_or_create_cert(hass: HomeAssistant, creds: dict, region: str) -> dict:
-    """
-    Load existing X.509 cert from HA storage, or create a new one.
-    Cert is created once via AWS IoT CreateKeysAndCertificate and reused.
-    Mirrors Android's AWSIotKeystoreHelper.
-    """
     store = Store(hass, CERT_STORAGE_VERSION, CERT_STORAGE_KEY)
     cert_data = await store.async_load()
-
     if cert_data:
         _LOGGER.debug("Zemote: loaded existing X.509 cert from storage")
         return cert_data
 
     _LOGGER.info("Zemote: creating new X.509 certificate via AWS IoT...")
-    cert_data = await hass.async_add_executor_job(
-        _create_cert, creds, region
-    )
+    cert_data = await hass.async_add_executor_job(_create_cert, creds, region)
     await store.async_save(cert_data)
     _LOGGER.info("Zemote: certificate created and stored (id: %s...)", cert_data["certificateId"][:16])
     return cert_data
 
 
 def _create_cert(creds: dict, region: str) -> dict:
-    """Create a new X.509 cert, activate it, attach zemote_policy to it."""
     iot = boto3.client(
         "iot",
         region_name=region,
@@ -78,32 +63,22 @@ def _create_cert(creds: dict, region: str) -> dict:
         aws_secret_access_key=creds["SecretKey"],
         aws_session_token=creds["SessionToken"],
     )
-
     result = iot.create_keys_and_certificate(setAsActive=True)
     cert_data = {
         "certificateArn": result["certificateArn"],
-        "certificateId":  result["certificateId"],
+        "certificateId": result["certificateId"],
         "certificatePem": result["certificatePem"],
-        "privateKey":     result["keyPair"]["PrivateKey"],
+        "privateKey": result["keyPair"]["PrivateKey"],
     }
-
     iot.attach_policy(policyName=IOT_POLICY_NAME, target=cert_data["certificateArn"])
-    _LOGGER.debug("Zemote: IoT policy '%s' attached to cert %s",
-                  IOT_POLICY_NAME, cert_data["certificateArn"])
     return cert_data
 
 
-# ------------------------------------------------------------------ #
-# HA entry setup / teardown
-# ------------------------------------------------------------------ #
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    # Bootstrap: get Cognito creds to create cert if needed
     identity_id = entry.data.get("identity_id", "")
     creds = await hass.async_add_executor_job(
         _fetch_cognito_credentials, identity_id, AWS_REGION_COGNITO
     )
-
     cert_data = await _load_or_create_cert(hass, creds, AWS_REGION_COGNITO)
 
     hub = ZemoteHub(hass, entry, cert_data)
@@ -130,29 +105,19 @@ def _fetch_cognito_credentials(identity_id: str, region: str) -> dict:
     cognito = boto3.client("cognito-identity", region_name=region)
     if not identity_id:
         identity_id = cognito.get_id(IdentityPoolId=IDENTITY_POOL_ID)["IdentityId"]
-    creds = cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
-    return creds
+    return cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
 
-
-# ------------------------------------------------------------------ #
-# Hub
-# ------------------------------------------------------------------ #
 
 class ZemoteHub:
     """Central hub — one per config entry / Zemote account."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, cert_data: dict) -> None:
-        self.hass         = hass
-        self.entry        = entry
-        self._cert_data   = cert_data
-        self._mqtt        = None
-        self.devices: list[dict]            = entry.data.get("devices", [])
+        self.hass = hass
+        self.entry = entry
+        self._cert_data = cert_data
+        self._mqtt = None
+        self.devices: list[dict] = entry.data.get("devices", [])
         self.device_states: dict[str, dict] = {}
-        self._region = AWS_REGION_COGNITO
-
-    # ------------------------------------------------------------------ #
-    # Setup / teardown
-    # ------------------------------------------------------------------ #
 
     def setup(self) -> None:
         self._connect_mqtt()
@@ -164,19 +129,14 @@ class ZemoteHub:
             try:
                 self._mqtt.loop_stop()
                 self._mqtt.disconnect()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             self._mqtt = None
 
-    # ------------------------------------------------------------------ #
-    # MQTT — paho over TLS port 8883 with X.509 cert (paho 1.x + 2.x)
-    # ------------------------------------------------------------------ #
-
     def _connect_mqtt(self) -> None:
         cert_pem = self._cert_data["certificatePem"]
-        key_pem  = self._cert_data["privateKey"]
+        key_pem = self._cert_data["privateKey"]
 
-        # Write cert + key to temp files (paho requires file paths for TLS)
         cert_file = tempfile.NamedTemporaryFile(suffix=".pem", delete=False, mode="w")
         cert_file.write(cert_pem)
         cert_file.flush()
@@ -195,10 +155,7 @@ class ZemoteHub:
                     protocol=mqtt.MQTTv311,
                 )
             else:
-                client = mqtt.Client(
-                    client_id=str(uuid.uuid4()),
-                    protocol=mqtt.MQTTv311,
-                )
+                client = mqtt.Client(client_id=str(uuid.uuid4()), protocol=mqtt.MQTTv311)
 
             client.tls_set(
                 ca_certs=certifi.where(),
@@ -207,9 +164,9 @@ class ZemoteHub:
                 tls_version=ssl.PROTOCOL_TLS_CLIENT,
             )
 
-            client.on_connect    = self._on_connect
+            client.on_connect = self._on_connect
             client.on_disconnect = self._on_disconnect
-            client.on_message    = self._on_shadow_message
+            client.on_message = self._on_shadow_message
 
             client.connect(AWS_IOT_ENDPOINT, port=8883, keepalive=60)
             client.loop_start()
@@ -223,17 +180,14 @@ class ZemoteHub:
                 raise TimeoutError("Zemote: MQTT TLS connection timed out after 10s")
 
             self._mqtt = client
-            _LOGGER.info("Zemote: connected to AWS IoT (%s) via X.509/TLS port 8883",
-                         AWS_IOT_ENDPOINT)
+            _LOGGER.info("Zemote: connected to AWS IoT (%s) via X.509/TLS port 8883", AWS_IOT_ENDPOINT)
         finally:
             os.unlink(cert_file.name)
             os.unlink(key_file.name)
 
     def _on_connect(self, client, userdata, flags, rc_or_reason, properties=None) -> None:
         rc = rc_or_reason if not hasattr(rc_or_reason, "value") else rc_or_reason.value
-        if rc == 0:
-            _LOGGER.debug("Zemote MQTT connected (rc=0)")
-        else:
+        if rc != 0:
             _LOGGER.error("Zemote MQTT connect failed rc=%s", rc)
 
     def _on_disconnect(self, client, userdata, rc_or_flags, rc=None, properties=None) -> None:
@@ -243,32 +197,32 @@ class ZemoteHub:
 
     def _subscribe_all(self) -> None:
         for serial in {d["serialNumber"] for d in self.devices}:
-            topic = f"$aws/things/{serial}/shadow/update/accepted"
-            self._mqtt.subscribe(topic, qos=0)
-            _LOGGER.debug("Zemote: subscribed to %s", topic)
+            for suffix in ("update/accepted", "get/accepted"):
+                topic = f"$aws/things/{serial}/shadow/{suffix}"
+                self._mqtt.subscribe(topic, qos=0)
+                _LOGGER.debug("Zemote: subscribed to %s", topic)
 
     def _ping_all(self) -> None:
-        for serial in {d["serialNumber"] for d in self.devices}:
+        serials = {d["serialNumber"] for d in self.devices}
+        lock_serials = {d["serialNumber"] for d in self.devices if d.get("platform") == "lock"}
+        for serial in serials - lock_serials:
             self.publish(serial, {"PING": "ping"}, _bypass_check=True)
-
-    # ------------------------------------------------------------------ #
-    # Shadow message handler
-    # ------------------------------------------------------------------ #
+        for serial in lock_serials:
+            topic = f"$aws/things/{serial}/shadow/get"
+            self._mqtt.publish(topic, "", qos=0)
+            _LOGGER.debug("Zemote -> %s : <empty>", topic)
 
     def _on_shadow_message(self, client, userdata, message) -> None:
         try:
-            parts  = message.topic.split("/")
+            parts = message.topic.split("/")
             serial = parts[2] if len(parts) > 2 else "unknown"
-
-            outer    = json.loads(message.payload.decode("utf-8"))
-            state    = outer.get("state", {})
+            outer = json.loads(message.payload.decode("utf-8"))
+            state = outer.get("state", {})
             if isinstance(state, str):
                 state = json.loads(state)
             reported = state.get("reported", {})
             if isinstance(reported, str):
                 reported = json.loads(reported)
-
-            _LOGGER.debug("Zemote shadow %s -> %s", serial, reported)
             self.device_states[serial] = {
                 **self.device_states.get(serial, {}),
                 **reported,
@@ -279,19 +233,15 @@ class ZemoteHub:
                 f"{SIGNAL_STATE_UPDATED}_{serial}",
                 reported,
             )
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             _LOGGER.error("Zemote shadow parse error [%s]: %s", message.topic, err)
-
-    # ------------------------------------------------------------------ #
-    # Publish helpers
-    # ------------------------------------------------------------------ #
 
     def publish(self, serial: str, payload: dict, _bypass_check: bool = False) -> None:
         if self._mqtt is None or not self._mqtt.is_connected():
             _LOGGER.warning("Zemote: MQTT not connected, dropping publish to %s", serial)
             return
         topic = f"$aws/things/{serial}/shadow/update"
-        msg   = json.dumps({"state": {"desired": payload}})
+        msg = json.dumps({"state": {"desired": payload}})
         self._mqtt.publish(topic, msg, qos=0)
         _LOGGER.debug("Zemote -> %s : %s", topic, msg)
 

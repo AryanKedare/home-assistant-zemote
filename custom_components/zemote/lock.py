@@ -1,7 +1,7 @@
-"""Zemote lock platform — door lock modules.
+"""Zemote lock platform — standalone smart lock modules.
 
 Unlock is restricted to local network requests only.
-Lock (securing) is always allowed from anywhere.
+Lock modules use custom ST/SC payloads instead of normal channel values.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from .const import DOMAIN, SIGNAL_STATE_UPDATED
 
 _LOGGER = logging.getLogger(__name__)
 
-# RFC-1918 + link-local private ranges
 _LOCAL_NETWORKS = [
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("10.0.0.0/8"),
@@ -30,7 +29,6 @@ _LOCAL_NETWORKS = [
 
 
 def _is_local_ip(ip_str: str) -> bool:
-    """Return True if ip_str is within a private/local network range."""
     try:
         ip = ipaddress.ip_address(ip_str)
         return any(ip in net for net in _LOCAL_NETWORKS)
@@ -44,29 +42,19 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub = hass.data[DOMAIN][entry.entry_id]
-    locks = [
-        ZemoteLock(hub, d)
-        for d in hub.devices
-        if d["platform"] == "lock"
-    ]
+    locks = [ZemoteLock(hub, d) for d in hub.devices if d["platform"] == "lock"]
     async_add_entities(locks, True)
 
 
 class ZemoteLock(LockEntity):
-    """Represents a Zemote lock channel.
-
-    Unlock is only permitted when called from a local/home network IP.
-    Locking is always permitted (fail-safe: locking from anywhere is fine).
-    """
+    """Represents a Zemote standalone lock module."""
 
     def __init__(self, hub: Any, device: dict) -> None:
-        self._hub     = hub
-        self._device  = device
-        self._serial  = device["serialNumber"]
-        self._channel = device["channelKey"]
-
+        self._hub = hub
+        self._device = device
+        self._serial = device["serialNumber"]
         self._attr_unique_id = f"zemote_{device['applianceId']}"
-        self._attr_name      = device["name"]
+        self._attr_name = device["name"]
 
         room = device.get("roomName")
         if room:
@@ -74,24 +62,21 @@ class ZemoteLock(LockEntity):
 
     @property
     def is_locked(self) -> bool | None:
-        val = self._hub.get_channel_state(self._serial, self._channel)
-        try:
-            # 0 = unlocked, 1 = locked  (matches Zemote shadow convention)
-            return int(val) == 1
-        except (TypeError, ValueError):
-            return None
+        state = self._hub.device_states.get(self._serial, {})
+        st = str(state.get("ST", "")).lower()
+        sc = str(state.get("SC", "")).lower()
+        if st in {"on", "ok"} and sc != "ok":
+            return True
+        if sc in {"on", "ok"} or st == "off":
+            return False
+        return None
 
     async def async_lock(self, **kwargs: Any) -> None:
-        """Lock — always allowed regardless of origin."""
-        self._hub.set_channel(self._serial, self._channel, 1)
+        self._hub.publish(self._serial, {"SC": "off", "ST": "on"})
 
     async def async_unlock(self, **kwargs: Any) -> None:
-        """Unlock — only allowed from local/home network."""
         origin_ip = self._get_origin_ip()
-
         if origin_ip is None:
-            # No IP context means it came from an internal automation/script on
-            # the HA host itself — treat as local and allow.
             _LOGGER.debug("Zemote: unlock allowed (no origin IP — internal call)")
         elif not _is_local_ip(origin_ip):
             _LOGGER.warning(
@@ -100,11 +85,9 @@ class ZemoteLock(LockEntity):
                 origin_ip,
             )
             return
-
-        self._hub.set_channel(self._serial, self._channel, 0)
+        self._hub.publish(self._serial, {"SC": "on", "ST": "off"})
 
     def _get_origin_ip(self) -> str | None:
-        """Extract origin IP from HA context if available."""
         context = getattr(self, "_context", None)
         if context is None:
             return None
@@ -123,9 +106,8 @@ class ZemoteLock(LockEntity):
             await self._async_assign_area(room)
 
     async def _async_assign_area(self, room_name: str) -> None:
-        """Look up or create the area and assign this device to it."""
         from homeassistant.helpers import area_registry as ar, device_registry as dr
-        area_reg   = ar.async_get(self.hass)
+        area_reg = ar.async_get(self.hass)
         device_reg = dr.async_get(self.hass)
 
         area = area_reg.async_get_area_by_name(room_name)
@@ -138,5 +120,5 @@ class ZemoteLock(LockEntity):
 
     @callback
     def _handle_update(self, reported: dict) -> None:
-        if self._channel in reported:
+        if "ST" in reported or "SC" in reported:
             self.async_write_ha_state()
