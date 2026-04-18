@@ -19,7 +19,7 @@ TABLE_MODULE_DATA = "Module_Data"
 TABLE_ROOM        = "Room"
 
 # HA platforms we register
-PLATFORMS = ["light", "switch", "fan", "cover"]
+PLATFORMS = ["light", "switch", "fan", "cover", "lock"]
 
 # Dispatcher signal prefix — appended with serial number
 SIGNAL_STATE_UPDATED = "zemote_state_updated"
@@ -46,3 +46,6 @@ SUR_TYPE_MAP = {
     "PROJECTOR":    "switch",
     "MOODLIGHT":    "light",
 }
+
+# Lock module type prefix → lock platform
+LOCK_TYPE_PREFIXES = ("DL",)

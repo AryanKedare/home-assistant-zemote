@@ -1,7 +1,7 @@
 {
   "domain": "zemote",
   "name": "Zemote",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "documentation": "https://github.com/AryanKedare/ha-zemote",
   "requirements": ["boto3>=1.26.0", "paho-mqtt>=2.0.0", "certifi>=2023.0.0"],
   "dependencies": [],
