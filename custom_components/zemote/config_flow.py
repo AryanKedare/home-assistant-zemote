@@ -24,6 +24,7 @@ from .const import (
     DIMMER_YES,
     FAN_TYPE_PREFIXES,
     LIGHT_TYPE_PREFIXES,
+    LOCK_TYPE_PREFIXES,
     SUR_TYPE_MAP,
 )
 
@@ -173,7 +174,7 @@ def _scan_all(table, filter_expr) -> list[dict]:
 
 
 # ------------------------------------------------------------------ #
-# Account data fetch (unchanged)
+# Account data fetch
 # ------------------------------------------------------------------ #
 
 def _fetch_account_data(email: str) -> dict:
@@ -189,7 +190,7 @@ def _fetch_account_data(email: str) -> dict:
     identity_id = cognito.get_id(IdentityPoolId=IDENTITY_POOL_ID)["IdentityId"]
     creds = cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
 
-    # ── Step 2: DynamoDB session ──────────────────────────────────
+    # ── Step 2: DynamoDB session ──────────────────────────────
     session = boto3.Session(
         aws_access_key_id=creds["AccessKeyId"],
         aws_secret_access_key=creds["SecretKey"],
@@ -198,7 +199,7 @@ def _fetch_account_data(email: str) -> dict:
     )
     dynamo = session.resource("dynamodb", region_name=AWS_REGION_DYNAMO)
 
-    # ── Step 3: Master table ────────────────────────────────────────
+    # ── Step 3: Master table ────────────────────────────────────
     master_resp = dynamo.Table(TABLE_MASTER).query(
         KeyConditionExpression=Key("email").eq(email)
     )
@@ -207,13 +208,13 @@ def _fetch_account_data(email: str) -> dict:
         h["serialNumber"]: h for h in hubs if "serialNumber" in h
     }
 
-    # ── Step 4: Module_Data table ──────────────────────────────────
+    # ── Step 4: Module_Data table ──────────────────────────────
     module_resp = dynamo.Table(TABLE_MODULE_DATA).query(
         KeyConditionExpression=Key("email").eq(email)
     )
     modules = module_resp.get("Items", [])
 
-    # ── Step 5: Room table (scan + filter) ───────────────────────────
+    # ── Step 5: Room table (scan + filter) ───────────────────────
     rooms = _scan_all(
         dynamo.Table(TABLE_ROOM),
         Attr("email").eq(email),
@@ -236,7 +237,7 @@ def _fetch_account_data(email: str) -> dict:
 
     _LOGGER.info("Zemote: built appliance->room map with %d entries", len(appliance_room))
 
-    # ── Step 6: Build device list ────────────────────────────────
+    # ── Step 6: Build device list ──────────────────────────────
     devices: list[dict] = []
     seen_ids: set[str] = set()
 
@@ -317,6 +318,29 @@ def _fetch_account_data(email: str) -> dict:
                 "channelKey":   sub_type,
                 "dimmable":     False,
                 "platform":     "cover",
+                "hubName":      hub_name,
+                "roomName":     room,
+            })
+
+        # lockData — door locks
+        for item in mod.get("lockData") or []:
+            sub_id   = item.get("applianceId", "")
+            sub_type = item.get("type", "")
+            raw_name = item.get("name") or sub_id
+            if not sub_id or not sub_type or sub_type.upper() == DIMMER_NA:
+                continue
+            if sub_id in seen_ids:
+                continue
+            seen_ids.add(sub_id)
+            room = appliance_room.get(sub_id, "")
+            devices.append({
+                "applianceId":  sub_id,
+                "moduleId":     appliance_id,
+                "serialNumber": serial,
+                "name":         _prefixed_name(room, raw_name),
+                "channelKey":   sub_type,
+                "dimmable":     False,
+                "platform":     "lock",
                 "hubName":      hub_name,
                 "roomName":     room,
             })
