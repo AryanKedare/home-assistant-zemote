@@ -5,14 +5,8 @@ Hardware behaviour:
   - Sending NLK=<device_id> temporarily unlocks it; hardware auto-relocks
     itself after a few seconds (no manual lock command needed).
   - Sending NLK="ok" resets the NLK state field only.
-  - There is no L1 / reported state from this device — shadow reported is
-    always empty. Lock state is tracked purely via NLK responses.
-
-State logic:
-  - is_locked starts as True (hardware is locked on boot).
-  - On successful NLK unlock → optimistically set unlocked, then
-    auto-relock in HA after AUTO_RELOCK_SECS (matches hardware behaviour).
-  - On any NLK failure → remain locked.
+  - Shadow reported is always empty on this device — lock state is tracked
+    purely via NLK responses on the update/accepted topic.
 
 NLK response codes:
   ok  / 203 → unlocked successfully
@@ -23,9 +17,11 @@ NLK response codes:
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
+import uuid
 from typing import Any
 
 from homeassistant.components.lock import LockEntity, LockEntityFeature
@@ -40,10 +36,8 @@ from .const import DOMAIN, SIGNAL_STATE_UPDATED
 _LOGGER = logging.getLogger(__name__)
 
 # How long (seconds) to show "unlocked" in HA before auto-relocking.
-# Hardware relocks itself; this just keeps the HA UI in sync.
 AUTO_RELOCK_SECS = 10
 
-# Matches Android hex IDs (16 hex chars). iOS UUIDs are longer with dashes.
 _ANDROID_ID_RE = re.compile(r'^[0-9a-f]{16}$', re.IGNORECASE)
 
 _NLK_CODES: dict[str, str] = {
@@ -57,10 +51,6 @@ _NLK_CODES: dict[str, str] = {
 
 
 def _pick_device_id(lock_data: list[dict]) -> str | None:
-    """Pick the best device ID from lockData.
-
-    Prefers Android hex IDs (16 lowercase hex chars) over iOS UUIDs.
-    """
     if not lock_data:
         return None
     for entry in lock_data:
@@ -81,10 +71,7 @@ async def async_setup_entry(
 
 
 class ZemoteLock(LockEntity):
-    """Represents a Zemote standalone smart lock module.
-
-    The underlying hardware auto-relocks; HA mirrors this with a timer.
-    """
+    """Represents a Zemote standalone smart lock module."""
 
     _attr_has_entity_name = False
     _attr_supported_features = LockEntityFeature(0)
@@ -94,14 +81,12 @@ class ZemoteLock(LockEntity):
         self._device = device
         self._serial: str = device["serialNumber"]
 
-        # Auto-select device ID from lockData
         lock_data: list[dict] = device.get("lockData", [])
         self._device_id: str | None = _pick_device_id(lock_data)
         if self._device_id:
             _LOGGER.info(
                 "Zemote lock %s: using device_id=%s for NLK unlock",
-                self._serial,
-                self._device_id,
+                self._serial, self._device_id,
             )
         else:
             _LOGGER.warning(
@@ -111,7 +96,6 @@ class ZemoteLock(LockEntity):
 
         self._attr_unique_id = f"zemote_{device['applianceId']}"
         self._attr_name = device["name"]
-
         room = device.get("roomName") or ""
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._serial)},
@@ -121,7 +105,7 @@ class ZemoteLock(LockEntity):
             suggested_area=room or None,
         )
 
-        # Hardware is always locked by default.
+        # Hardware is always locked by default
         self._locked: bool = True
         self._relock_timer: threading.Timer | None = None
 
@@ -132,7 +116,7 @@ class ZemoteLock(LockEntity):
         self._vacation: str | None = None
         self._nlk_last: str | None = None
 
-    # ── State ───────────────────────────────────────────────────────────────
+    # ── State ──────────────────────────────────────────────────
 
     @property
     def is_locked(self) -> bool:
@@ -157,7 +141,7 @@ class ZemoteLock(LockEntity):
             attrs["device_id"] = self._device_id
         return attrs
 
-    # ── Actions ─────────────────────────────────────────────────────────────
+    # ── Actions ──────────────────────────────────────────────────
 
     async def async_unlock(self, **kwargs: Any) -> None:
         if not self._device_id:
@@ -169,51 +153,59 @@ class ZemoteLock(LockEntity):
         await self.hass.async_add_executor_job(self._send_nlk, self._device_id)
 
     async def async_lock(self, **kwargs: Any) -> None:
-        """Lock is a no-op — hardware auto-relocks. Just update HA state."""
-        _LOGGER.info(
-            "Zemote lock %s: lock called — hardware auto-relocks, updating state only",
-            self._serial,
-        )
+        """Hardware auto-relocks — just update HA state."""
+        _LOGGER.info("Zemote lock %s: lock called — resetting HA state", self._serial)
         self._cancel_relock_timer()
         self._locked = True
         self.async_write_ha_state()
 
     def _send_nlk(self, nlk_value: str) -> None:
-        """Publish NLK desired state and wait up to 15 s for the reported echo."""
+        """Publish NLK and wait for response via a dedicated paho subscription.
+
+        Mirrors the working CLI script: subscribe to update/accepted,
+        publish the NLK desired payload, wait up to 15s for the echo.
+        Uses a unique mid-string so we can cleanly unsubscribe after.
+        """
+        topic_accepted = f"$aws/things/{self._serial}/shadow/update/accepted"
         received = threading.Event()
         result: list[str] = []
 
-        original_handler = self._hub._mqtt.on_message
+        # Use a unique callback tag so multiple locks don't cross-fire
+        cb_id = f"_nlk_{uuid.uuid4().hex[:8]}"
 
-        def _on_nlk_response(client, userdata, message):
-            if original_handler:
-                original_handler(client, userdata, message)
+        def _on_nlk_msg(client, userdata, message):
             try:
-                import json
                 data = json.loads(message.payload.decode())
                 reported = data.get("state", {}).get("reported", {})
                 nlk = reported.get("NLK")
                 if nlk and not received.is_set():
                     result.append(nlk)
                     received.set()
-            except Exception:
-                pass
+            except Exception as err:
+                _LOGGER.debug("Zemote lock NLK parse error: %s", err)
 
-        self._hub._mqtt.on_message = _on_nlk_response
+        mqtt_client = self._hub._mqtt
+
+        # Subscribe with a message-callback-add so we don't disturb the
+        # hub's global on_message handler
+        mqtt_client.message_callback_add(topic_accepted, _on_nlk_msg)
+        mqtt_client.subscribe(topic_accepted, qos=1)
+
         try:
             self._hub.publish(self._serial, {"NLK": nlk_value})
+            _LOGGER.debug("Zemote lock %s: waiting 15s for NLK response", self._serial)
             received.wait(timeout=15)
         finally:
-            self._hub._mqtt.on_message = original_handler
+            mqtt_client.unsubscribe(topic_accepted)
+            mqtt_client.message_callback_remove(topic_accepted)
 
         if result:
             nlk = result[0]
             self._nlk_last = nlk
             desc = _NLK_CODES.get(nlk, f"unknown response: {nlk}")
-            _LOGGER.info("Zemote lock %s NLK response: %s (%s)", self._serial, nlk, desc)
+            _LOGGER.info("Zemote lock %s NLK=%s (%s)", self._serial, nlk, desc)
 
             if nlk in ("ok", "203"):
-                # Successfully unlocked — show unlocked in HA, then auto-relock
                 self._locked = False
                 self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
                 self._schedule_relock()
@@ -223,24 +215,22 @@ class ZemoteLock(LockEntity):
                 )
                 self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
             else:
-                # Any failure — stay locked
                 _LOGGER.warning(
-                    "Zemote lock %s: unlock failed (NLK=%s %s)", self._serial, nlk, desc
+                    "Zemote lock %s: unlock failed NLK=%s (%s)", self._serial, nlk, desc
                 )
                 self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
         else:
             _LOGGER.warning("Zemote lock %s: no NLK response within 15s", self._serial)
 
-    # ── Auto-relock timer ─────────────────────────────────────────────────
+    # ── Auto-relock timer ─────────────────────────────────────────────
 
     def _schedule_relock(self) -> None:
-        """Start a timer to relock HA state after AUTO_RELOCK_SECS."""
         self._cancel_relock_timer()
         self._relock_timer = threading.Timer(AUTO_RELOCK_SECS, self._do_relock)
         self._relock_timer.daemon = True
         self._relock_timer.start()
         _LOGGER.debug(
-            "Zemote lock %s: auto-relock scheduled in %ds", self._serial, AUTO_RELOCK_SECS
+            "Zemote lock %s: auto-relock in %ds", self._serial, AUTO_RELOCK_SECS
         )
 
     def _cancel_relock_timer(self) -> None:
@@ -249,21 +239,15 @@ class ZemoteLock(LockEntity):
             self._relock_timer = None
 
     def _do_relock(self) -> None:
-        """Called by timer — relock HA state to match hardware."""
         _LOGGER.info("Zemote lock %s: auto-relocking HA state", self._serial)
         self._locked = True
         self._relock_timer = None
         self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
 
-    # ── Shadow state parsing (attributes only, no lock state from shadow) ──────
+    # ── Shadow updates (attributes only) ──────────────────────────────
 
     @callback
     def _handle_update(self, reported: dict) -> None:
-        """Handle shadow updates — only parse attributes, not lock state.
-
-        This device does not report lock state via shadow; NLK responses
-        are the only source of truth for lock/unlock state.
-        """
         changed = False
 
         if "BAT" in reported:
@@ -284,19 +268,15 @@ class ZemoteLock(LockEntity):
         if "RSSI" in reported:
             self._rssi = str(reported["RSSI"])
             changed = True
-
         if "CV" in reported:
             self._firmware = str(reported["CV"])
             changed = True
-
         if "ONTIME" in reported:
             self._uptime = str(reported["ONTIME"])
             changed = True
-
         if "SET" in reported:
             self._vacation = str(reported["SET"])
             changed = True
-
         if "NLK" in reported:
             self._nlk_last = str(reported["NLK"])
             changed = True
@@ -304,7 +284,7 @@ class ZemoteLock(LockEntity):
         if changed:
             self.async_write_ha_state()
 
-    # ── HA lifecycle ───────────────────────────────────────────────────────
+    # ── HA lifecycle ──────────────────────────────────────────────────
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
