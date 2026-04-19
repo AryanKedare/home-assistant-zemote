@@ -4,8 +4,14 @@ Unlock uses the NLK mechanism: publish NLK=<device_id> to unlock,
 NLK="ok" to reset/lock. Device ID is auto-selected from lockData
 stored in the device dict, preferring Android hex IDs (non-UUID format).
 
+State logic:
+  - is_locked returns None until the shadow confirms state (shows "unknown" in HA)
+  - NLK response codes drive optimistic lock state updates
+  - L1 field from shadow reported is used only as a confirmation signal
+    (L1=0 → locked, L1=1 → unlocked) but ONLY after shadow is first received
+
 NLK response codes:
-  ok  / 203 → unlocked successfully
+  ok  / 203 → unlocked/accepted successfully
   013       → device ID not matched
   206       → vacation mode ON, unlock blocked
   205       → lock offline
@@ -33,7 +39,7 @@ _LOGGER = logging.getLogger(__name__)
 _ANDROID_ID_RE = re.compile(r'^[0-9a-f]{16}$', re.IGNORECASE)
 
 _NLK_CODES: dict[str, str] = {
-    "ok":  "unlocked/command accepted",
+    "ok":  "command accepted",
     "203": "unlocked",
     "002": "access denied — device ID not authorised",
     "205": "lock is offline",
@@ -52,12 +58,10 @@ def _pick_device_id(lock_data: list[dict]) -> str | None:
     """
     if not lock_data:
         return None
-    # Prefer Android IDs
     for entry in lock_data:
         did = entry.get("deviceId", "")
         if _ANDROID_ID_RE.match(did):
             return did
-    # Fall back to first available
     return lock_data[0].get("deviceId") or None
 
 
@@ -109,8 +113,11 @@ class ZemoteLock(LockEntity):
             suggested_area=room or None,
         )
 
-        # Internal state — default locked until shadow reports otherwise
-        self._locked: bool = True
+        # None = unknown until shadow responds. This prevents HA from showing
+        # a default "unlocked" state before the real state is fetched.
+        self._locked: bool | None = None
+        self._shadow_received: bool = False
+
         self._battery: str | None = None
         self._rssi: str | None = None
         self._firmware: str | None = None
@@ -121,8 +128,17 @@ class ZemoteLock(LockEntity):
     # ── State ────────────────────────────────────────────────────────────────
 
     @property
-    def is_locked(self) -> bool:
+    def is_locked(self) -> bool | None:
+        """Return True=locked, False=unlocked, None=unknown (not yet fetched)."""
         return self._locked
+
+    @property
+    def is_locking(self) -> bool:
+        return False
+
+    @property
+    def is_unlocking(self) -> bool:
+        return False
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -166,7 +182,6 @@ class ZemoteLock(LockEntity):
         original_handler = self._hub._mqtt.on_message
 
         def _on_nlk_response(client, userdata, message):
-            # Always forward to the hub's normal handler
             if original_handler:
                 original_handler(client, userdata, message)
             try:
@@ -193,14 +208,13 @@ class ZemoteLock(LockEntity):
             desc = _NLK_CODES.get(nlk, f"unknown response: {nlk}")
             _LOGGER.info("Zemote lock %s NLK response: %s (%s)", self._serial, nlk, desc)
 
-            # Update locked state based on response
             if nlk in ("ok", "203"):
-                if nlk_value == "ok":
-                    self._locked = True
-                else:
-                    self._locked = False
+                # nlk_value="ok" means we sent a lock/reset command
+                self._locked = (nlk_value == "ok")
             elif nlk == "206":
-                _LOGGER.warning("Zemote lock %s: unlock blocked — vacation mode ON", self._serial)
+                _LOGGER.warning(
+                    "Zemote lock %s: unlock blocked — vacation mode ON", self._serial
+                )
 
             self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
         else:
@@ -212,12 +226,31 @@ class ZemoteLock(LockEntity):
     def _handle_update(self, reported: dict) -> None:
         changed = False
 
-        # Lock state: L1=0 → locked, L1=1 → unlocked
+        # L1 field: only trust it once we have received at least one shadow update.
+        # L1=0 → locked, L1=1 → unlocked.
+        # We deliberately do NOT set _locked from L1 on the very first message
+        # if it says unlocked (1), because the hardware default is locked and the
+        # shadow may carry a stale desired value. Instead, after the first shadow
+        # is received we always trust L1 going forward.
         if "L1" in reported:
-            l1 = reported["L1"]
-            new_locked = (int(l1) == 0)
-            if new_locked != self._locked:
-                self._locked = new_locked
+            try:
+                l1_val = int(reported["L1"])
+                new_locked = (l1_val == 0)
+                if not self._shadow_received:
+                    # First shadow: if L1=0 (locked) trust it; if L1=1 default
+                    # to locked (fail-safe) since hardware boots locked.
+                    self._locked = True if new_locked else True
+                else:
+                    self._locked = new_locked
+                self._shadow_received = True
+                changed = True
+            except (ValueError, TypeError):
+                pass
+        else:
+            # Shadow arrived but no L1 — mark as received and default to locked
+            if not self._shadow_received:
+                self._locked = True
+                self._shadow_received = True
                 changed = True
 
         # Battery
