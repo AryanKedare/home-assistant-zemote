@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
 from typing import Any
 
 import boto3
@@ -39,6 +40,32 @@ STEP_USER_SCHEMA = vol.Schema({
 _ANDROID_ID_RE = re.compile(r'^[0-9a-f]{16}$', re.IGNORECASE)
 
 
+def _sync_clock() -> None:
+    """
+    Force an NTP time sync to prevent AWS InvalidSignatureException caused
+    by clock skew. Tries ntpdate first, falls back to chronyc, then
+    timedatectl. Logs a warning if all methods fail — AWS calls may still
+    work if skew is within the 5-minute window.
+    """
+    for cmd in (
+        ["ntpdate", "-u", "pool.ntp.org"],
+        ["chronyc", "makestep"],
+        ["timedatectl", "set-ntp", "true"],
+    ):
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=10)
+            if result.returncode == 0:
+                _LOGGER.debug("Zemote: clock synced via %s", cmd[0])
+                return
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    _LOGGER.warning(
+        "Zemote: could not sync system clock — AWS calls may fail if clock "
+        "skew exceeds 5 minutes. Run 'ntpdate -u pool.ntp.org' manually on "
+        "your HA host to fix this."
+    )
+
+
 def _strip_module_prefix(name: str, hub_name: str) -> str:
     """Strip the hub name prefix from a device name."""
     stripped = name.strip()
@@ -57,7 +84,6 @@ def _pick_lock_device_id(module: dict) -> str | None:
         did = str(entry.get("deviceId", "")).strip()
         if _ANDROID_ID_RE.match(did):
             return did
-    # fallback: first entry whatever it is
     if lock_data:
         return str(lock_data[0].get("deviceId", "")).strip() or None
     return None
@@ -115,6 +141,8 @@ class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 def _verify_login(email: str, password: str) -> bool:
+    _sync_clock()
+
     cognito = boto3.client("cognito-identity", region_name=AWS_REGION_COGNITO)
     identity_id = cognito.get_id(IdentityPoolId=IDENTITY_POOL_ID)["IdentityId"]
     creds = cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
@@ -333,7 +361,6 @@ def _fetch_account_data(email: str) -> dict:
         if not appliance_id or appliance_id in seen_ids:
             continue
 
-        # Look up Module_Data for this lock serial to extract deviceId from lockData
         lock_module = next((m for m in modules if m.get("serialNumber") == serial), None)
         device_id = _pick_lock_device_id(lock_module or {})
         if device_id:
