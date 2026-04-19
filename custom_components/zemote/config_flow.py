@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import boto3
@@ -35,20 +36,31 @@ STEP_USER_SCHEMA = vol.Schema({
     vol.Required("password"): str,
 })
 
+_ANDROID_ID_RE = re.compile(r'^[0-9a-f]{16}$', re.IGNORECASE)
+
 
 def _strip_module_prefix(name: str, hub_name: str) -> str:
-    """Strip the hub name prefix from a device name.
-
-    The raw name in DynamoDB is stored as '<hub_name> <device_label>'
-    e.g. 'Children SB2 Fan'. We want only 'Fan'.
-    Strips leading/trailing whitespace before comparing to handle any
-    inconsistent spacing in the DB values.
-    """
+    """Strip the hub name prefix from a device name."""
     stripped = name.strip()
     prefix = hub_name.strip() if hub_name else ""
     if prefix and stripped.lower().startswith(prefix.lower()):
         stripped = stripped[len(prefix):].strip()
     return stripped if stripped else name.strip()
+
+
+def _pick_lock_device_id(module: dict) -> str | None:
+    """Pick best deviceId from Module_Data.lockData — prefer 16-char Android hex IDs."""
+    lock_data = module.get("lockData") or []
+    if not isinstance(lock_data, list):
+        return None
+    for entry in lock_data:
+        did = str(entry.get("deviceId", "")).strip()
+        if _ANDROID_ID_RE.match(did):
+            return did
+    # fallback: first entry whatever it is
+    if lock_data:
+        return str(lock_data[0].get("deviceId", "")).strip() or None
+    return None
 
 
 class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -320,6 +332,15 @@ def _fetch_account_data(email: str) -> dict:
             appliance_id = module.get("applianceId", "") if module else ""
         if not appliance_id or appliance_id in seen_ids:
             continue
+
+        # Look up Module_Data for this lock serial to extract deviceId from lockData
+        lock_module = next((m for m in modules if m.get("serialNumber") == serial), None)
+        device_id = _pick_lock_device_id(lock_module or {})
+        if device_id:
+            _LOGGER.info("Zemote config_flow: lock %s deviceId=%s", serial, device_id)
+        else:
+            _LOGGER.warning("Zemote config_flow: lock %s — no deviceId found in lockData", serial)
+
         seen_ids.add(appliance_id)
         room = appliance_room.get(appliance_id, "Other") or "Other"
         raw_name = master.get("deviceName") or appliance_id or serial
@@ -334,6 +355,7 @@ def _fetch_account_data(email: str) -> dict:
             "hubName": raw_name,
             "roomName": room,
             "isLockModule": True,
+            "deviceId": device_id,
         })
 
     _LOGGER.info("Zemote: discovered %d devices for %s", len(devices), email)

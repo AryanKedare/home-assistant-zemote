@@ -34,8 +34,6 @@ _LOGGER = logging.getLogger(__name__)
 
 AUTO_RELOCK_SECS = 10
 
-_ANDROID_ID_RE = re.compile(r'^[0-9a-f]{16}$', re.IGNORECASE)
-
 _NLK_CODES: dict[str, str] = {
     "ok":  "command accepted",
     "203": "unlocked",
@@ -44,17 +42,6 @@ _NLK_CODES: dict[str, str] = {
     "013": "device ID not matched",
     "206": "vacation mode ON — unlock blocked",
 }
-
-
-def _pick_device_id(lock_data: list[dict]) -> str | None:
-    """Prefer 16-char Android hex IDs over iOS UUIDs."""
-    if not lock_data:
-        return None
-    for entry in lock_data:
-        did = entry.get("deviceId", "")
-        if _ANDROID_ID_RE.match(did):
-            return did
-    return lock_data[0].get("deviceId") or None
 
 
 async def async_setup_entry(
@@ -77,12 +64,12 @@ class ZemoteLock(LockEntity):
         self._hub = hub
         self._serial: str = device["serialNumber"]
 
-        lock_data: list[dict] = device.get("lockData", [])
-        self._device_id: str | None = _pick_device_id(lock_data)
+        # deviceId is now stored directly on the device dict by config_flow
+        self._device_id: str | None = device.get("deviceId") or None
         if self._device_id:
             _LOGGER.info("Zemote lock %s: device_id=%s", self._serial, self._device_id)
         else:
-            _LOGGER.warning("Zemote lock %s: no device ID in lockData", self._serial)
+            _LOGGER.warning("Zemote lock %s: no device ID — cannot unlock", self._serial)
 
         self._attr_unique_id = f"zemote_{device['applianceId']}"
         self._attr_name = device["name"]
@@ -138,7 +125,6 @@ class ZemoteLock(LockEntity):
             _LOGGER.error("Zemote lock %s: no device ID — cannot unlock", self._serial)
             return
         _LOGGER.info("Zemote lock %s: publishing NLK=%s", self._serial, self._device_id)
-        # Fire-and-forget — response arrives via _on_shadow_message → dispatcher → _handle_update
         self._hub.publish(self._serial, {"NLK": self._device_id})
 
     async def async_lock(self, **kwargs: Any) -> None:
@@ -188,10 +174,8 @@ class ZemoteLock(LockEntity):
                 self._schedule_relock()
             elif nlk == "206":
                 _LOGGER.warning("Zemote lock %s: unlock blocked — vacation mode ON", self._serial)
-                # stay locked
             else:
                 _LOGGER.warning("Zemote lock %s: NLK=%s — %s", self._serial, nlk, desc)
-                # stay locked
             changed = True
 
         if changed:
@@ -229,7 +213,6 @@ class ZemoteLock(LockEntity):
                 self._handle_update,
             )
         )
-        # Request current shadow to populate attributes
         if self._hub._mqtt and self._hub._mqtt.is_connected():
             self._hub._mqtt.publish(
                 f"$aws/things/{self._serial}/shadow/get", "", qos=0
