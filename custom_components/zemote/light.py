@@ -33,8 +33,6 @@ _LOGGER = logging.getLogger(__name__)
 _DEFAULT_RGB: tuple[int, int, int] = (127, 127, 127)
 
 
-# ── helpers ───────────────────────────────────────────────────────── #
-
 def _mdl_str(r: int, g: int, b: int) -> str:
     return f"{int(r):03d},{int(g):03d},{int(b):03d}"
 
@@ -48,8 +46,6 @@ def _parse_mdl(mdl: str) -> tuple[int, int, int] | None:
     except (ValueError, AttributeError):
         return None
 
-
-# ── platform setup ────────────────────────────────────────────────── #
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -67,8 +63,6 @@ async def async_setup_entry(
 
     async_add_entities(entities, True)
 
-
-# ── Normal light ──────────────────────────────────────────────────── #
 
 class ZemoteLight(LightEntity):
     """On/off or dimmable light channel."""
@@ -95,7 +89,8 @@ class ZemoteLight(LightEntity):
             identifiers={(DOMAIN, device["applianceId"])},
             name=device.get("name"),
             manufacturer="Zemote",
-            model="Hub Module",
+            model=device.get("serialNumber"),
+            serial_number=device.get("serialNumber"),
             suggested_area=device.get("roomName") or None,
         )
 
@@ -143,8 +138,6 @@ class ZemoteLight(LightEntity):
             self.async_write_ha_state()
 
 
-# ── MOODlight ─────────────────────────────────────────────────────── #
-
 class ZemoteMoodlight(LightEntity):
     """MOODlight RGB entity — cesrm serial, MDL = RRR,GGG,BBB protocol."""
 
@@ -163,7 +156,8 @@ class ZemoteMoodlight(LightEntity):
             identifiers={(DOMAIN, device["applianceId"])},
             name=device.get("name", "MOODlight"),
             manufacturer="Zemote",
-            model="MOODlight",
+            model=device.get("serialNumber"),
+            serial_number=device.get("serialNumber"),
             suggested_area=device.get("roomName") or None,
         )
 

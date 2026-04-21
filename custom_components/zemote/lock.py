@@ -21,7 +21,13 @@ import re
 from typing import Any
 
 from homeassistant.components.lock import LockEntity, LockEntityFeature
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
@@ -50,8 +56,13 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub = hass.data[DOMAIN][entry.entry_id]
-    locks = [ZemoteLock(hub, d) for d in hub.devices if d.get("platform") == "lock"]
-    async_add_entities(locks, True)
+    entities = []
+    for d in hub.devices:
+        if d.get("platform") == "lock":
+            lock = ZemoteLock(hub, d)
+            entities.append(lock)
+            entities.append(ZemoteLockBattery(hub, d, lock))
+    async_add_entities(entities, True)
 
 
 class ZemoteLock(LockEntity):
@@ -64,7 +75,6 @@ class ZemoteLock(LockEntity):
         self._hub = hub
         self._serial: str = device["serialNumber"]
 
-        # deviceId is now stored directly on the device dict by config_flow
         self._device_id: str | None = device.get("deviceId") or None
         if self._device_id:
             _LOGGER.info("Zemote lock %s: device_id=%s", self._serial, self._device_id)
@@ -78,22 +88,23 @@ class ZemoteLock(LockEntity):
             identifiers={(DOMAIN, self._serial)},
             name=device.get("hubName") or self._serial,
             manufacturer="Zemote",
-            model="Smart Lock",
+            model=device.get("serialNumber"),
+            serial_number=device.get("serialNumber"),
             suggested_area=room or None,
         )
 
-        # Always locked on boot — hardware is locked by default
         self._locked: bool = True
         self._relock_cancel = None
 
         self._battery: str | None = None
+        self._battery_pct: int | None = None
         self._rssi: str | None = None
         self._firmware: str | None = None
         self._uptime: str | None = None
         self._vacation: str | None = None
         self._nlk_last: str | None = None
 
-    # ── State ───────────────────────────────────────────────────
+    # ── State ───────────────────────────────────────────────
 
     @property
     def is_locked(self) -> bool:
@@ -118,7 +129,7 @@ class ZemoteLock(LockEntity):
             attrs["device_id"] = self._device_id
         return attrs
 
-    # ── Actions ───────────────────────────────────────────────────
+    # ── Actions ─────────────────────────────────────────────
 
     async def async_unlock(self, **kwargs: Any) -> None:
         if not self._device_id:
@@ -133,27 +144,30 @@ class ZemoteLock(LockEntity):
         self._locked = True
         self.async_write_ha_state()
 
-    # ── NLK response handler (called by dispatcher from hub) ──────────────
+    # ── Update handler ────────────────────────────────────────
 
     @callback
     def _handle_update(self, reported: dict) -> None:
-        """Handle shadow update/accepted — attributes + NLK state."""
         changed = False
 
-        # ── Attributes ──
         if "BAT" in reported:
             try:
                 b = int(reported["BAT"])
                 if b == 205:
                     self._battery = "offline"
+                    self._battery_pct = None
                 elif b <= 100:
                     self._battery = f"{b}%"
+                    self._battery_pct = b
                 elif b <= 201:
                     self._battery = f"{b - 100}% (unregistered)"
+                    self._battery_pct = b - 100
                 else:
                     self._battery = str(b)
+                    self._battery_pct = None
             except (ValueError, TypeError):
                 self._battery = str(reported["BAT"])
+                self._battery_pct = None
             changed = True
 
         for key, attr in (("RSSI", "_rssi"), ("CV", "_firmware"),
@@ -162,7 +176,6 @@ class ZemoteLock(LockEntity):
                 setattr(self, attr, str(reported[key]))
                 changed = True
 
-        # ── NLK lock state ──
         if "NLK" in reported:
             nlk = str(reported["NLK"])
             self._nlk_last = nlk
@@ -181,7 +194,7 @@ class ZemoteLock(LockEntity):
         if changed:
             self.async_write_ha_state()
 
-    # ── Auto-relock (HA async timer via async_call_later) ────────────────
+    # ── Auto-relock ──────────────────────────────────────────
 
     @callback
     def _schedule_relock(self) -> None:
@@ -203,7 +216,7 @@ class ZemoteLock(LockEntity):
             self._relock_cancel()
             self._relock_cancel = None
 
-    # ── HA lifecycle ───────────────────────────────────────────────────
+    # ── HA lifecycle ─────────────────────────────────────────
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
@@ -220,3 +233,41 @@ class ZemoteLock(LockEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         self._cancel_relock()
+
+
+class ZemoteLockBattery(SensorEntity):
+    """Battery percentage sensor for a Zemote smart lock."""
+
+    _attr_has_entity_name   = False
+    _attr_device_class      = SensorDeviceClass.BATTERY
+    _attr_state_class       = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+
+    def __init__(self, hub: Any, device: dict, lock: ZemoteLock) -> None:
+        self._lock   = lock
+        self._serial = device["serialNumber"]
+
+        self._attr_unique_id = f"zemote_{device['applianceId']}_battery"
+        self._attr_name      = f"{device['name']} Battery"
+
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._serial)},
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        return self._lock._battery_pct
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{SIGNAL_STATE_UPDATED}_{self._serial}",
+                self._handle_update,
+            )
+        )
+
+    @callback
+    def _handle_update(self, reported: dict) -> None:
+        if "BAT" in reported:
+            self.async_write_ha_state()
