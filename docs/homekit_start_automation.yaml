@@ -1,0 +1,18 @@
+alias: Start HomeKit after boot (stable layout)
+description: >-
+  Delays HomeKit bridge start by 30 seconds after HA boots.
+  This ensures all entities are registered before HomeKit assigns
+  accessory IDs, preventing Apple Home room layout from resetting.
+mode: single
+trigger:
+  - platform: homeassistant
+    event: start
+condition: []
+action:
+  - delay:
+      hours: 0
+      minutes: 0
+      seconds: 30
+      milliseconds: 0
+  - service: homekit.start
+    data: {}
