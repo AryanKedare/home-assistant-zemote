@@ -27,6 +27,7 @@ from .const import (
     FAN_TYPE_PREFIXES,
     LIGHT_TYPE_PREFIXES,
     SUR_TYPE_MAP,
+    MOODLIGHT_SERIAL_PREFIX,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,12 +42,6 @@ _ANDROID_ID_RE = re.compile(r'^[0-9a-f]{16}$', re.IGNORECASE)
 
 
 def _sync_clock() -> None:
-    """
-    Force an NTP time sync to prevent AWS InvalidSignatureException caused
-    by clock skew. Tries ntpdate first, falls back to chronyc, then
-    timedatectl. Logs a warning if all methods fail — AWS calls may still
-    work if skew is within the 5-minute window.
-    """
     for cmd in (
         ["ntpdate", "-u", "pool.ntp.org"],
         ["chronyc", "makestep"],
@@ -61,13 +56,11 @@ def _sync_clock() -> None:
             continue
     _LOGGER.warning(
         "Zemote: could not sync system clock — AWS calls may fail if clock "
-        "skew exceeds 5 minutes. Run 'ntpdate -u pool.ntp.org' manually on "
-        "your HA host to fix this."
+        "skew exceeds 5 minutes."
     )
 
 
 def _strip_module_prefix(name: str, hub_name: str) -> str:
-    """Strip the hub name prefix from a device name."""
     stripped = name.strip()
     prefix = hub_name.strip() if hub_name else ""
     if prefix and stripped.lower().startswith(prefix.lower()):
@@ -76,7 +69,6 @@ def _strip_module_prefix(name: str, hub_name: str) -> str:
 
 
 def _pick_lock_device_id(module: dict) -> str | None:
-    """Pick best deviceId from Module_Data.lockData — prefer 16-char Android hex IDs."""
     lock_data = module.get("lockData") or []
     if not isinstance(lock_data, list):
         return None
@@ -110,7 +102,7 @@ class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 auth_ok = await self.hass.async_add_executor_job(
                     _verify_login, email, password
                 )
-            except Exception as err:  # noqa: BLE001
+            except Exception as err:
                 _LOGGER.exception("Zemote auth error: %s", err)
                 errors["base"] = "cannot_connect"
             else:
@@ -121,7 +113,7 @@ class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data = await self.hass.async_add_executor_job(
                             _fetch_account_data, email
                         )
-                    except Exception as err:  # noqa: BLE001
+                    except Exception as err:
                         _LOGGER.exception("Zemote config flow error: %s", err)
                         errors["base"] = "cannot_connect"
                     else:
@@ -244,6 +236,38 @@ def _fetch_account_data(email: str) -> dict:
         appliance_id = mod.get("applianceId", "")
         hub = serial_to_master.get(serial, {})
         hub_name = hub.get("deviceName", serial)
+
+        # ── MOODlight detection ──────────────────────────────────────
+        # cesrm serials are MOODlight modules. The DynamoDB surData.type
+        # is stored as "NA" for these, so the normal SUR_TYPE_MAP path
+        # never fires. We detect by serial prefix instead.
+        if serial.startswith(MOODLIGHT_SERIAL_PREFIX):
+            # One MOODlight entity per cesrm module
+            # applianceId is the ML0xxxx id from Master table
+            ml_appliance_id = hub.get("applianceId") or appliance_id
+            if ml_appliance_id and ml_appliance_id not in seen_ids:
+                seen_ids.add(ml_appliance_id)
+                room = appliance_room.get(ml_appliance_id, "")
+                raw_name = _strip_module_prefix(
+                    hub.get("deviceName") or ml_appliance_id, hub_name
+                )
+                devices.append({
+                    "applianceId": ml_appliance_id,
+                    "moduleId":    appliance_id,
+                    "serialNumber": serial,
+                    "name":        raw_name or "MOODlight",
+                    "channelKey":  "MDL",
+                    "dimmable":    False,
+                    "platform":    "moodlight",
+                    "hubName":     hub_name,
+                    "roomName":    room,
+                })
+                _LOGGER.info(
+                    "Zemote: MOODlight detected serial=%s applianceId=%s",
+                    serial, ml_appliance_id,
+                )
+            continue   # skip all other data blocks for cesrm modules
+        # ── end MOODlight ────────────────────────────────────────────
 
         for item in mod.get("lfmData") or []:
             sub_id = item.get("applianceId", "")
