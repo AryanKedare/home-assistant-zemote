@@ -237,38 +237,6 @@ def _fetch_account_data(email: str) -> dict:
         hub = serial_to_master.get(serial, {})
         hub_name = hub.get("deviceName", serial)
 
-        # ── MOODlight detection ──────────────────────────────────────
-        # cesrm serials are MOODlight modules. The DynamoDB surData.type
-        # is stored as "NA" for these, so the normal SUR_TYPE_MAP path
-        # never fires. We detect by serial prefix instead.
-        if serial.startswith(MOODLIGHT_SERIAL_PREFIX):
-            # One MOODlight entity per cesrm module
-            # applianceId is the ML0xxxx id from Master table
-            ml_appliance_id = hub.get("applianceId") or appliance_id
-            if ml_appliance_id and ml_appliance_id not in seen_ids:
-                seen_ids.add(ml_appliance_id)
-                room = appliance_room.get(ml_appliance_id, "")
-                raw_name = _strip_module_prefix(
-                    hub.get("deviceName") or ml_appliance_id, hub_name
-                )
-                devices.append({
-                    "applianceId": ml_appliance_id,
-                    "moduleId":    appliance_id,
-                    "serialNumber": serial,
-                    "name":        raw_name or "MOODlight",
-                    "channelKey":  "MDL",
-                    "dimmable":    False,
-                    "platform":    "moodlight",
-                    "hubName":     hub_name,
-                    "roomName":    room,
-                })
-                _LOGGER.info(
-                    "Zemote: MOODlight detected serial=%s applianceId=%s",
-                    serial, ml_appliance_id,
-                )
-            continue   # skip all other data blocks for cesrm modules
-        # ── end MOODlight ────────────────────────────────────────────
-
         for item in mod.get("lfmData") or []:
             sub_id = item.get("applianceId", "")
             sub_type = item.get("type", "")
@@ -331,28 +299,45 @@ def _fetch_account_data(email: str) -> dict:
                 "roomName": room,
             })
 
+        # surData — handles IR remotes, MOODlight (ML0xxxx), and other single-channel modules
+        # MOODlight rows have surData.type = "MOODLIGHT" and serial prefix cesrm
+        # SUR_TYPE_MAP["MOODLIGHT"] = "moodlight" routes them to moodlight.py
         sur = mod.get("surData")
         if sur:
             sur_type = sur.get("type", "").upper()
-            sur_id = sur.get("applianceId") or appliance_id
-            raw_name = _strip_module_prefix(sur.get("name") or sur_id, hub_name)
-            if sur_type and sur_type != DIMMER_NA and raw_name != DIMMER_NA:
+            sur_name = sur.get("name", "")
+            sur_id   = appliance_id   # applianceId on the module row IS the sur appliance id
+            raw_name = _strip_module_prefix(sur_name or sur_id, hub_name)
+
+            if sur_type and sur_type != DIMMER_NA and sur_name != DIMMER_NA:
                 if sur_id and sur_id not in seen_ids:
                     seen_ids.add(sur_id)
                     room = appliance_room.get(sur_id, "")
-                    devices.append({
+                    platform = SUR_TYPE_MAP.get(sur_type, "switch")
+
+                    entry: dict = {
                         "applianceId": sur_id,
-                        "moduleId": appliance_id,
+                        "moduleId":    sur_id,
                         "serialNumber": serial,
-                        "name": raw_name,
-                        "channelKey": sur_type,
-                        "dimmable": False,
-                        "platform": SUR_TYPE_MAP.get(sur_type, "switch"),
-                        "hubName": hub_name,
-                        "roomName": room,
-                        "surBrand": sur.get("brand", ""),
-                        "surCodeset": sur.get("codeset", ""),
-                    })
+                        "name":        raw_name or sur_type,
+                        "channelKey":  sur_type,
+                        "dimmable":    False,
+                        "platform":    platform,
+                        "hubName":     hub_name,
+                        "roomName":    room,
+                        "surBrand":    sur.get("brand", ""),
+                        "surCodeset":  sur.get("codeset", ""),
+                    }
+
+                    # MOODlight extra fields
+                    if platform == "moodlight":
+                        entry["channelKey"] = "MDL"
+                        _LOGGER.info(
+                            "Zemote: MOODlight applianceId=%s serial=%s",
+                            sur_id, serial,
+                        )
+
+                    devices.append(entry)
 
         rgb = mod.get("rgbData")
         if rgb:
