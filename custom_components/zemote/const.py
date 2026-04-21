@@ -5,7 +5,8 @@ DOMAIN = "zemote"
 # Config entry version — bump to force re-discovery when platform logic changes
 # v4: switched MQTT transport from SigV4 WebSocket (port 443) to X.509 TLS (port 8883)
 # v5: entity names now use room + raw_name only (no hub/module name prefix)
-CONFIG_VERSION = 5
+# v6: added moodlight platform for cesrm serial devices
+CONFIG_VERSION = 6
 
 # AWS
 AWS_REGION_COGNITO = "ap-southeast-1"
@@ -20,7 +21,7 @@ TABLE_MODULE_DATA = "Module_Data"
 TABLE_ROOM        = "Room"
 
 # HA platforms we register
-PLATFORMS = ["light", "switch", "fan", "cover", "lock"]
+PLATFORMS = ["light", "switch", "fan", "cover", "lock", "moodlight"]
 
 # Dispatcher signal prefix — appended with serial number
 SIGNAL_STATE_UPDATED = "zemote_state_updated"
@@ -45,8 +46,11 @@ SUR_TYPE_MAP = {
     "DVD":          "switch",
     "HOME_THEATRE": "switch",
     "PROJECTOR":    "switch",
-    "MOODLIGHT":    "light",
+    "MOODLIGHT":    "moodlight",
 }
 
 # Lock module type prefix → lock platform
 LOCK_TYPE_PREFIXES = ("DL",)
+
+# MOODlight serial prefix — cesrm devices use MDL = 'RRR,GGG,BBB' protocol
+MOODLIGHT_SERIAL_PREFIX = "cesrm"
