@@ -21,13 +21,7 @@ import re
 from typing import Any
 
 from homeassistant.components.lock import LockEntity, LockEntityFeature
-from homeassistant.components.sensor import (
-    SensorDeviceClass,
-    SensorEntity,
-    SensorStateClass,
-)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
@@ -56,13 +50,8 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     hub = hass.data[DOMAIN][entry.entry_id]
-    entities = []
-    for d in hub.devices:
-        if d.get("platform") == "lock":
-            lock = ZemoteLock(hub, d)
-            entities.append(lock)
-            entities.append(ZemoteLockBattery(hub, d, lock))
-    async_add_entities(entities, True)
+    locks = [ZemoteLock(hub, d) for d in hub.devices if d.get("platform") == "lock"]
+    async_add_entities(locks, True)
 
 
 class ZemoteLock(LockEntity):
@@ -233,41 +222,3 @@ class ZemoteLock(LockEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         self._cancel_relock()
-
-
-class ZemoteLockBattery(SensorEntity):
-    """Battery percentage sensor for a Zemote smart lock."""
-
-    _attr_has_entity_name   = False
-    _attr_device_class      = SensorDeviceClass.BATTERY
-    _attr_state_class       = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = PERCENTAGE
-
-    def __init__(self, hub: Any, device: dict, lock: ZemoteLock) -> None:
-        self._lock   = lock
-        self._serial = device["serialNumber"]
-
-        self._attr_unique_id = f"zemote_{device['applianceId']}_battery"
-        self._attr_name      = f"{device['name']} Battery"
-
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._serial)},
-        )
-
-    @property
-    def native_value(self) -> int | None:
-        return self._lock._battery_pct
-
-    async def async_added_to_hass(self) -> None:
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                f"{SIGNAL_STATE_UPDATED}_{self._serial}",
-                self._handle_update,
-            )
-        )
-
-    @callback
-    def _handle_update(self, reported: dict) -> None:
-        if "BAT" in reported:
-            self.async_write_ha_state()

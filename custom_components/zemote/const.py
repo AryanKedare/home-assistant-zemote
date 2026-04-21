@@ -6,6 +6,7 @@ DOMAIN = "zemote"
 # v4: switched MQTT transport from SigV4 WebSocket (port 443) to X.509 TLS (port 8883)
 # v5: entity names now use room + raw_name only (no hub/module name prefix)
 # v6: MOODlight support via MDL key (cesrm serial) — merged into light.py
+# v7: lock battery sensor moved to sensor.py
 CONFIG_VERSION = 6
 
 # AWS
@@ -21,7 +22,7 @@ TABLE_MODULE_DATA = "Module_Data"
 TABLE_ROOM        = "Room"
 
 # HA platforms we register
-PLATFORMS = ["light", "switch", "fan", "cover", "lock"]
+PLATFORMS = ["light", "switch", "fan", "cover", "lock", "sensor"]
 
 # Dispatcher signal prefix — appended with serial number
 SIGNAL_STATE_UPDATED = "zemote_state_updated"
