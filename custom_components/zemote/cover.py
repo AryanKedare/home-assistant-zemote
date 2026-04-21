@@ -53,7 +53,7 @@ class ZemoteCover(CoverEntity):
             identifiers={(DOMAIN, device["applianceId"])},
             name=device["name"],
             manufacturer="Zemote",
-            model="Hub Module",
+            model=device.get("serialNumber"),
             serial_number=device.get("serialNumber"),
             suggested_area=device.get("roomName") or None,
             via_device=(DOMAIN, self._serial),
