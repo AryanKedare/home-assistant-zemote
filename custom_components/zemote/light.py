@@ -73,7 +73,7 @@ async def async_setup_entry(
 class ZemoteLight(LightEntity):
     """On/off or dimmable light channel."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(self, hub: Any, device: dict) -> None:
         self._hub     = hub
@@ -148,7 +148,7 @@ class ZemoteLight(LightEntity):
 class ZemoteMoodlight(LightEntity):
     """MOODlight RGB entity — cesrm serial, MDL = RRR,GGG,BBB protocol."""
 
-    _attr_has_entity_name        = True
+    _attr_has_entity_name        = False
     _attr_color_mode             = ColorMode.RGB
     _attr_supported_color_modes  = {ColorMode.RGB}
 
@@ -198,7 +198,6 @@ class ZemoteMoodlight(LightEntity):
         g = max(0, min(255, g))
         b = max(0, min(255, b))
 
-        # avoid accidental off when brightness is dragged to 0
         if r == 0 and g == 0 and b == 0:
             r, g, b = _DEFAULT_RGB
 
