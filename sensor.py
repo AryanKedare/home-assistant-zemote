@@ -1,19 +1,28 @@
-"""Zemote sensor platform — battery status sensor for smart locks.
+"""Zemote sensor platform — battery percentage sensor for smart locks.
 
-The Zemote lock shadow reports BAT as a string status:
-  "ok"      → battery healthy
-  "low"     → battery low
-  "offline" → device offline
-  "203"     → numeric codes possible in some firmware
-There is no numeric percentage in the shadow protocol.
+The Zemote lock shadow reports BAT as a numeric value (mirrored from
+AWSSubscriptionAndFeedback.java lambdasubscribetotopicupdateaccepted4):
+
+  0–100   → battery percentage directly
+  101–201 → (value - 100)% for unregistered/guest device IDs
+  205     → device offline
+  other   → unknown, stored as raw string
+
+BAT arrives via:
+  - shadow/update/accepted  (live MQTT push)
+  - shadow/get/accepted     (requested on startup by lock entity & hub._ping_all)
+
+Both paths go through hub._on_shadow_message → SIGNAL_STATE_UPDATED dispatch
+→ _handle_update here, so battery is populated on first load from cloud.
 """
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
@@ -23,17 +32,25 @@ from .const import DOMAIN, SIGNAL_STATE_UPDATED
 
 _LOGGER = logging.getLogger(__name__)
 
-# Numeric BAT codes the device sometimes sends
-_BAT_CODES: dict[str, str] = {
-    "203": "ok",
-    "205": "offline",
-}
 
+def _parse_bat(raw: Any) -> tuple[int | None, str]:
+    """Return (pct_or_None, display_string) from a raw BAT shadow value.
 
-def _parse_bat(raw: Any) -> str:
-    """Normalise raw BAT value to a human-readable string."""
-    s = str(raw).strip()
-    return _BAT_CODES.get(s, s)
+    Mirrors the BAT parsing logic in ZemoteLock._handle_update (lock.py).
+    """
+    try:
+        b = int(raw)
+    except (ValueError, TypeError):
+        return None, str(raw)
+
+    if b == 205:
+        return None, "offline"
+    if b <= 100:
+        return b, f"{b}%"
+    if b <= 201:
+        pct = b - 100
+        return pct, f"{pct}% (unregistered)"
+    return None, str(b)
 
 
 async def async_setup_entry(
@@ -51,13 +68,17 @@ async def async_setup_entry(
 
 
 class ZemoteLockBattery(SensorEntity):
-    """Battery status sensor for a Zemote smart lock.
+    """Battery percentage sensor for a Zemote smart lock.
 
-    Displays the raw BAT status string from the device shadow
-    (e.g. 'ok', 'low', 'offline').
+    Reads BAT from the AWS IoT Thing Shadow (state.reported.BAT).
+    Value is fetched from cloud via shadow GET on startup — no device
+    connection required to see the last-known battery level.
     """
 
     _attr_has_entity_name = False
+    _attr_device_class = SensorDeviceClass.BATTERY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
     _attr_icon = "mdi:battery"
 
     def __init__(self, hub: Any, device: dict) -> None:
@@ -71,16 +92,26 @@ class ZemoteLockBattery(SensorEntity):
             identifiers={(DOMAIN, self._serial)},
         )
 
-        self._status: str | None = None
+        self._pct: int | None = None
+        self._display: str | None = None
 
-        # Seed from already-received shadow state
+        # Seed from already-received shadow state (e.g. if hub got the GET
+        # response before this entity was added to HA)
         existing = hub.device_states.get(self._serial, {})
         if "BAT" in existing:
-            self._status = _parse_bat(existing["BAT"])
+            self._pct, self._display = _parse_bat(existing["BAT"])
 
     @property
-    def native_value(self) -> str | None:
-        return self._status
+    def native_value(self) -> int | None:
+        """Return battery percentage (0-100), or None if unknown/offline."""
+        return self._pct
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs: dict[str, Any] = {}
+        if self._display is not None:
+            attrs["battery_status"] = self._display
+        return attrs
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
@@ -95,6 +126,8 @@ class ZemoteLockBattery(SensorEntity):
     def _handle_update(self, reported: dict) -> None:
         if "BAT" not in reported:
             return
-        self._status = _parse_bat(reported["BAT"])
-        _LOGGER.debug("Zemote lock %s battery: %s", self._serial, self._status)
+        self._pct, self._display = _parse_bat(reported["BAT"])
+        _LOGGER.debug(
+            "Zemote lock %s battery: %s (%s%%)", self._serial, self._display, self._pct
+        )
         self.async_write_ha_state()
