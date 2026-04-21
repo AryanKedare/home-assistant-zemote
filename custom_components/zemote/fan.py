@@ -74,6 +74,7 @@ class ZemoteFan(FanEntity):
             name=device["name"],
             manufacturer="Zemote",
             model="Hub Module",
+            serial_number=device.get("serialNumber"),
             suggested_area=device.get("roomName") or None,
             via_device=(DOMAIN, self._serial),
         )
