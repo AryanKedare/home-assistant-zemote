@@ -5,7 +5,7 @@ DOMAIN = "zemote"
 # Config entry version — bump to force re-discovery when platform logic changes
 # v4: switched MQTT transport from SigV4 WebSocket (port 443) to X.509 TLS (port 8883)
 # v5: entity names now use room + raw_name only (no hub/module name prefix)
-# v6: added moodlight platform for cesrm serial devices
+# v6: MOODlight support via MDL key (cesrm serial) — merged into light.py
 CONFIG_VERSION = 6
 
 # AWS
@@ -21,7 +21,7 @@ TABLE_MODULE_DATA = "Module_Data"
 TABLE_ROOM        = "Room"
 
 # HA platforms we register
-PLATFORMS = ["light", "switch", "fan", "cover", "lock", "moodlight"]
+PLATFORMS = ["light", "switch", "fan", "cover", "lock"]
 
 # Dispatcher signal prefix — appended with serial number
 SIGNAL_STATE_UPDATED = "zemote_state_updated"
@@ -39,6 +39,7 @@ FAN_TYPE_PREFIXES   = ("F",)
 LIGHT_TYPE_PREFIXES = ("L",)
 
 # SurData.type values → HA platform
+# MOODLIGHT routes to "moodlight" which is handled inside light.py
 SUR_TYPE_MAP = {
     "TV":           "switch",
     "AC":           "switch",
