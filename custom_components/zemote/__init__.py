@@ -22,11 +22,16 @@ from homeassistant.helpers.storage import Store
 from .const import (
     DOMAIN,
     AWS_REGION_COGNITO,
+    AWS_REGION_DYNAMO,
     AWS_IOT_ENDPOINT,
     IDENTITY_POOL_ID,
     IOT_POLICY_NAME,
     PLATFORMS,
     SIGNAL_STATE_UPDATED,
+    IR_REMOTE_TABLES,
+    IR_POWER_ON_FUNCTIONS,
+    IR_POWER_OFF_FUNCTIONS,
+    IR_POWER_TOGGLE_FUNCTIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,7 +85,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     cert_data = await _load_or_create_cert(hass, creds, AWS_REGION_COGNITO)
 
-    hub = ZemoteHub(hass, entry, cert_data)
+    hub = ZemoteHub(hass, entry, cert_data, creds)
     try:
         await hass.async_add_executor_job(hub.setup)
     except Exception as err:
@@ -107,13 +112,113 @@ def _fetch_cognito_credentials(identity_id: str, region: str) -> dict:
     return cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
 
 
+def _lookup_ir_raw_data(
+    creds: dict,
+    sur_type: str,
+    brand: str,
+    codeset: str,
+    want_on: bool,
+) -> str | None:
+    """Fetch the rawData pulse string for a power-on or power-off IR command.
+
+    Looks up the appropriate *remotedata DynamoDB table for the given
+    sur_type (e.g. "AC", "TV"), then scans codesetData entries for the
+    first entry whose `function` field matches the desired on/off keyword.
+
+    Returns the rawData string (comma-separated pulse timings) or None.
+    """
+    table_name = IR_REMOTE_TABLES.get(sur_type.upper())
+    if not table_name:
+        _LOGGER.warning("Zemote IR: no remote table for sur_type=%s", sur_type)
+        return None
+
+    session = boto3.Session(
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretKey"],
+        aws_session_token=creds["SessionToken"],
+        region_name=AWS_REGION_DYNAMO,
+    )
+    dynamo = session.resource("dynamodb", region_name=AWS_REGION_DYNAMO)
+    table = dynamo.Table(table_name)
+
+    # Try exact brand+codeset query first, fall back to scan if needed
+    try:
+        from boto3.dynamodb.conditions import Key as DKey, Attr
+        resp = table.query(
+            KeyConditionExpression=DKey("brand").eq(brand) & DKey("codeset").eq(codeset)
+        )
+        items = resp.get("Items", [])
+        if not items:
+            # Some tables use a scan-based layout; fall back
+            resp = table.scan(
+                FilterExpression=Attr("brand").eq(brand) & Attr("codeset").eq(codeset)
+            )
+            items = resp.get("Items", [])
+    except Exception as err:
+        _LOGGER.warning("Zemote IR: DynamoDB query error for %s brand=%s codeset=%s: %s",
+                        table_name, brand, codeset, err)
+        return None
+
+    if not items:
+        _LOGGER.warning(
+            "Zemote IR: no data found in %s for brand=%s codeset=%s",
+            table_name, brand, codeset,
+        )
+        return None
+
+    # Build the ordered list of function keywords to search for
+    candidates = IR_POWER_ON_FUNCTIONS if want_on else IR_POWER_OFF_FUNCTIONS
+    fallback   = IR_POWER_TOGGLE_FUNCTIONS
+
+    codeset_data: list[dict] = []
+    for item in items:
+        cd = item.get("codesetData") or []
+        if isinstance(cd, list):
+            codeset_data.extend(cd)
+        elif isinstance(cd, dict):       # some tables nest differently
+            for v in cd.values():
+                if isinstance(v, list):
+                    codeset_data.extend(v)
+
+    def _find(keywords: list[str]) -> str | None:
+        for kw in keywords:
+            for entry in codeset_data:
+                fn = str(entry.get("function", "")).lower().strip()
+                if kw in fn:
+                    raw = str(entry.get("rawData", "")).strip().rstrip(",")
+                    if raw:
+                        _LOGGER.debug(
+                            "Zemote IR: matched function='%s' kw='%s' rawData[0:30]=%s",
+                            fn, kw, raw[:30],
+                        )
+                        return raw
+        return None
+
+    result = _find(candidates) or _find(fallback)
+    if result is None:
+        fns = [str(e.get("function", "")) for e in codeset_data]
+        _LOGGER.warning(
+            "Zemote IR: could not match on/off function in %s brand=%s codeset=%s; "
+            "available functions: %s",
+            table_name, brand, codeset, fns,
+        )
+    return result
+
+
 class ZemoteHub:
     """Central hub — one per config entry / Zemote account."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, cert_data: dict) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        cert_data: dict,
+        creds: dict | None = None,
+    ) -> None:
         self.hass = hass
         self.entry = entry
         self._cert_data = cert_data
+        self._creds: dict = creds or {}
         self._mqtt = None
         self.devices: list[dict] = entry.data.get("devices", [])
         self.device_states: dict[str, dict] = {}
@@ -258,3 +363,42 @@ class ZemoteHub:
 
     def get_channel_state(self, serial: str, channel_key: str) -> Any:
         return self.device_states.get(serial, {}).get(channel_key)
+
+    async def async_send_ir_command(
+        self,
+        serial: str,
+        sur_type: str,
+        brand: str,
+        codeset: str,
+        want_on: bool,
+    ) -> bool:
+        """Look up and fire the correct IR pulse for a SUR device.
+
+        Runs the DynamoDB lookup in the executor (blocking boto3 call),
+        then publishes the rawData pulse string via the shadow topic.
+
+        Returns True if the command was sent, False if lookup failed.
+        """
+        raw_data = await self.hass.async_add_executor_job(
+            _lookup_ir_raw_data,
+            self._creds,
+            sur_type,
+            brand,
+            codeset,
+            want_on,
+        )
+        if raw_data is None:
+            _LOGGER.error(
+                "Zemote IR: could not find rawData for serial=%s type=%s brand=%s codeset=%s on=%s",
+                serial, sur_type, brand, codeset, want_on,
+            )
+            return False
+
+        # The hub firmware expects: {"state": {"desired": {"IR": "<pulse_string>"}}}
+        # The key "IR" is the standard channel key for IR blast on Zemote cemrm/cesrm hubs.
+        self.publish(serial, {"IR": raw_data})
+        _LOGGER.info(
+            "Zemote IR: sent %s command to serial=%s type=%s brand=%s codeset=%s",
+            "ON" if want_on else "OFF", serial, sur_type, brand, codeset,
+        )
+        return True

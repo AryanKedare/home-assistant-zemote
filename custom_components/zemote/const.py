@@ -21,6 +21,26 @@ TABLE_MASTER      = "Master"
 TABLE_MODULE_DATA = "Module_Data"
 TABLE_ROOM        = "Room"
 
+# DynamoDB IR remote data tables — keyed by SUR type (uppercase)
+# Each table stores rows with brand+codeset index and codesetData list.
+# codesetData entries have: function (str), rawData (str), frequency (int)
+IR_REMOTE_TABLES: dict[str, str] = {
+    "AC":           "ACremotedata",
+    "TV":           "TVremotedata",
+    "DTH":          "DTHremotedata",
+    "DVD":          "DVDBDremotedata",
+    "HOME_THEATRE": "HomeTheatreremotedata",
+    "PROJECTOR":    "Projectorremotedata",
+}
+
+# Function name strings to look for (in order of preference) when firing
+# power-on and power-off IR commands from a remote data table row.
+# The lookup is case-insensitive substring match.
+IR_POWER_ON_FUNCTIONS  = ["ac on", "power on", "on"]
+IR_POWER_OFF_FUNCTIONS = ["ac off", "power off", "off"]
+# Generic fallback — used when there is no separate on/off entry
+IR_POWER_TOGGLE_FUNCTIONS = ["power", "pwr"]
+
 # HA platforms we register
 PLATFORMS = ["light", "switch", "fan", "cover", "lock", "sensor"]
 
