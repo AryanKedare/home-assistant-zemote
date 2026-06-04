@@ -28,6 +28,10 @@ from .const import (
     LIGHT_TYPE_PREFIXES,
     SUR_TYPE_MAP,
     MOODLIGHT_SERIAL_PREFIX,
+    IR_REMOTE_TABLES,
+    IR_POWER_ON_FUNCTIONS,
+    IR_POWER_OFF_FUNCTIONS,
+    IR_POWER_TOGGLE_FUNCTIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,6 +85,84 @@ def _pick_lock_device_id(module: dict) -> str | None:
     return None
 
 
+def _fetch_ir_codes(
+    dynamo,
+    sur_type: str,
+    brand: str,
+    codeset: str,
+) -> tuple[str | None, str | None]:
+    """Fetch ON and OFF IR code strings from the remote data DynamoDB table.
+
+    Returns (on_code, off_code). Either may be None if not found.
+    If only a toggle code exists, returns (toggle_code, toggle_code).
+    """
+    table_name = IR_REMOTE_TABLES.get(sur_type.upper())
+    if not table_name:
+        _LOGGER.debug("Zemote IR: no remote table for sur_type=%s", sur_type)
+        return None, None
+
+    try:
+        table = dynamo.Table(table_name)
+        # Try primary key query first
+        try:
+            resp  = table.query(
+                KeyConditionExpression=Key("brand").eq(brand) & Key("codeset").eq(codeset)
+            )
+            items = resp.get("Items", [])
+        except Exception:
+            items = []
+
+        if not items:
+            resp  = table.scan(
+                FilterExpression=Attr("brand").eq(brand) & Attr("codeset").eq(codeset)
+            )
+            items = resp.get("Items", [])
+
+        if not items:
+            _LOGGER.warning(
+                "Zemote IR: no data in %s for brand=%s codeset=%s",
+                table_name, brand, codeset,
+            )
+            return None, None
+
+        # Flatten codesetData across all items
+        codeset_data: list[dict] = []
+        for item in items:
+            cd = item.get("codesetData") or []
+            if isinstance(cd, list):
+                codeset_data.extend(cd)
+
+        def _find(keywords: list[str]) -> str | None:
+            for kw in keywords:
+                for entry in codeset_data:
+                    fn  = str(entry.get("function", "")).lower().strip()
+                    raw = str(entry.get("rawData",   "")).strip().rstrip(",")
+                    if kw in fn and raw:
+                        return raw
+            return None
+
+        on_code  = _find(IR_POWER_ON_FUNCTIONS)
+        off_code = _find(IR_POWER_OFF_FUNCTIONS)
+        toggle   = _find(IR_POWER_TOGGLE_FUNCTIONS)
+
+        # If no separate on/off found, use toggle for both
+        if not on_code:  on_code  = toggle
+        if not off_code: off_code = toggle
+
+        if not on_code and not off_code:
+            fns = [str(e.get("function", "")) for e in codeset_data]
+            _LOGGER.warning(
+                "Zemote IR: could not match power functions in %s brand=%s codeset=%s. "
+                "Available: %s", table_name, brand, codeset, fns,
+            )
+
+        return on_code, off_code
+
+    except Exception as err:
+        _LOGGER.warning("Zemote IR: error fetching from %s: %s", table_name, err)
+        return None, None
+
+
 class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle the Zemote config flow."""
 
@@ -92,7 +174,7 @@ class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            email = user_input["email"].strip()
+            email    = user_input["email"].strip()
             password = user_input["password"]
 
             await self.async_set_unique_id(email.lower())
@@ -135,9 +217,9 @@ class ZemoteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 def _verify_login(email: str, password: str) -> bool:
     _sync_clock()
 
-    cognito = boto3.client("cognito-identity", region_name=AWS_REGION_COGNITO)
+    cognito     = boto3.client("cognito-identity", region_name=AWS_REGION_COGNITO)
     identity_id = cognito.get_id(IdentityPoolId=IDENTITY_POOL_ID)["IdentityId"]
-    creds = cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
+    creds       = cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
 
     session = boto3.Session(
         aws_access_key_id=creds["AccessKeyId"],
@@ -146,7 +228,7 @@ def _verify_login(email: str, password: str) -> bool:
         region_name=AWS_REGION_DYNAMO,
     )
     dynamo = session.resource("dynamodb", region_name=AWS_REGION_DYNAMO)
-    table = dynamo.Table(TABLE_VERIFICATION)
+    table  = dynamo.Table(TABLE_VERIFICATION)
 
     resp = table.get_item(Key={"email": email})
     item = resp.get("Item")
@@ -154,8 +236,7 @@ def _verify_login(email: str, password: str) -> bool:
         _LOGGER.warning("Zemote: no Verification record for %s", email)
         return False
 
-    stored_password = item.get("password", "")
-    if stored_password != password:
+    if item.get("password", "") != password:
         _LOGGER.warning("Zemote: password mismatch for %s", email)
         return False
 
@@ -174,7 +255,7 @@ def _classify_lfm(sub_type: str, dimmable_status: str) -> tuple[str, bool]:
 
 
 def _scan_all(table, filter_expr) -> list[dict]:
-    items = []
+    items  = []
     kwargs = {"FilterExpression": filter_expr}
     while True:
         resp = table.scan(**kwargs)
@@ -187,9 +268,9 @@ def _scan_all(table, filter_expr) -> list[dict]:
 
 
 def _fetch_account_data(email: str) -> dict:
-    cognito = boto3.client("cognito-identity", region_name=AWS_REGION_COGNITO)
+    cognito     = boto3.client("cognito-identity", region_name=AWS_REGION_COGNITO)
     identity_id = cognito.get_id(IdentityPoolId=IDENTITY_POOL_ID)["IdentityId"]
-    creds = cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
+    creds       = cognito.get_credentials_for_identity(IdentityId=identity_id)["Credentials"]
 
     session = boto3.Session(
         aws_access_key_id=creds["AccessKeyId"],
@@ -199,13 +280,11 @@ def _fetch_account_data(email: str) -> dict:
     )
     dynamo = session.resource("dynamodb", region_name=AWS_REGION_DYNAMO)
 
-    master_resp = dynamo.Table(TABLE_MASTER).query(
+    master_resp      = dynamo.Table(TABLE_MASTER).query(
         KeyConditionExpression=Key("email").eq(email)
     )
-    masters = master_resp.get("Items", [])
-    serial_to_master: dict[str, dict] = {
-        h["serialNumber"]: h for h in masters if "serialNumber" in h
-    }
+    masters          = master_resp.get("Items", [])
+    serial_to_master = {h["serialNumber"]: h for h in masters if "serialNumber" in h}
 
     module_resp = dynamo.Table(TABLE_MODULE_DATA).query(
         KeyConditionExpression=Key("email").eq(email)
@@ -218,7 +297,7 @@ def _fetch_account_data(email: str) -> dict:
     room_list: list[dict] = []
     for r in rooms:
         room_name = r.get("name", "")
-        room_id = str(r.get("roomId", ""))
+        room_id   = str(r.get("roomId", ""))
         if not room_name or not room_id:
             continue
         room_list.append({"roomId": room_id, "name": room_name})
@@ -228,19 +307,19 @@ def _fetch_account_data(email: str) -> dict:
             if aid and aid not in appliance_room:
                 appliance_room[aid] = room_name
 
-    devices: list[dict] = []
-    seen_ids: set[str] = set()
+    devices:  list[dict] = []
+    seen_ids: set[str]   = set()
 
     for mod in modules:
-        serial = mod.get("serialNumber", "")
+        serial       = mod.get("serialNumber", "")
         appliance_id = mod.get("applianceId", "")
-        hub = serial_to_master.get(serial, {})
-        hub_name = hub.get("deviceName", serial)
+        hub          = serial_to_master.get(serial, {})
+        hub_name     = hub.get("deviceName", serial)
 
         for item in mod.get("lfmData") or []:
-            sub_id = item.get("applianceId", "")
-            sub_type = item.get("type", "")
-            raw_name = _strip_module_prefix(item.get("name") or sub_id, hub_name)
+            sub_id          = item.get("applianceId", "")
+            sub_type        = item.get("type", "")
+            raw_name        = _strip_module_prefix(item.get("name") or sub_id, hub_name)
             dimmable_status = item.get("dimmableStatus", "")
             if not sub_id or not sub_type or sub_type.upper() == DIMMER_NA or sub_id in seen_ids:
                 continue
@@ -249,18 +328,18 @@ def _fetch_account_data(email: str) -> dict:
             room = appliance_room.get(sub_id, "")
             devices.append({
                 "applianceId": sub_id,
-                "moduleId": appliance_id,
+                "moduleId":    appliance_id,
                 "serialNumber": serial,
-                "name": raw_name,
-                "channelKey": sub_type,
-                "dimmable": dimmable,
-                "platform": platform,
-                "hubName": hub_name,
-                "roomName": room,
+                "name":        raw_name,
+                "channelKey":  sub_type,
+                "dimmable":    dimmable,
+                "platform":    platform,
+                "hubName":     hub_name,
+                "roomName":    room,
             })
 
         for item in mod.get("powerModuleData") or []:
-            sub_id = item.get("applianceId", "")
+            sub_id   = item.get("applianceId", "")
             sub_type = item.get("type", "")
             raw_name = _strip_module_prefix(item.get("name") or sub_id, hub_name)
             if not sub_id or not sub_type or sub_type.upper() == DIMMER_NA or sub_id in seen_ids:
@@ -269,18 +348,18 @@ def _fetch_account_data(email: str) -> dict:
             room = appliance_room.get(sub_id, "")
             devices.append({
                 "applianceId": sub_id,
-                "moduleId": appliance_id,
+                "moduleId":    appliance_id,
                 "serialNumber": serial,
-                "name": raw_name,
-                "channelKey": sub_type,
-                "dimmable": False,
-                "platform": "switch",
-                "hubName": hub_name,
-                "roomName": room,
+                "name":        raw_name,
+                "channelKey":  sub_type,
+                "dimmable":    False,
+                "platform":    "switch",
+                "hubName":     hub_name,
+                "roomName":    room,
             })
 
         for item in mod.get("curtainData") or []:
-            sub_id = item.get("applianceId", "")
+            sub_id   = item.get("applianceId", "")
             sub_type = item.get("type", "")
             raw_name = _strip_module_prefix(item.get("name") or sub_id, hub_name)
             if not sub_id or not sub_type or sub_type.upper() == DIMMER_NA or sub_id in seen_ids:
@@ -289,47 +368,67 @@ def _fetch_account_data(email: str) -> dict:
             room = appliance_room.get(sub_id, "")
             devices.append({
                 "applianceId": sub_id,
-                "moduleId": appliance_id,
+                "moduleId":    appliance_id,
                 "serialNumber": serial,
-                "name": raw_name,
-                "channelKey": sub_type,
-                "dimmable": False,
-                "platform": "cover",
-                "hubName": hub_name,
-                "roomName": room,
+                "name":        raw_name,
+                "channelKey":  sub_type,
+                "dimmable":    False,
+                "platform":    "cover",
+                "hubName":     hub_name,
+                "roomName":    room,
             })
 
-        # surData — handles IR remotes, MOODlight (ML0xxxx), and other single-channel modules
-        # MOODlight rows have surData.type = "MOODLIGHT" and serial prefix cesrm
-        # SUR_TYPE_MAP["MOODLIGHT"] = "moodlight" routes them to moodlight.py
         sur = mod.get("surData")
         if sur:
             sur_type = sur.get("type", "").upper()
             sur_name = sur.get("name", "")
-            sur_id   = appliance_id   # applianceId on the module row IS the sur appliance id
+            sur_id   = appliance_id
             raw_name = _strip_module_prefix(sur_name or sur_id, hub_name)
 
             if sur_type and sur_type != DIMMER_NA and sur_name != DIMMER_NA:
                 if sur_id and sur_id not in seen_ids:
                     seen_ids.add(sur_id)
-                    room = appliance_room.get(sur_id, "")
+                    room     = appliance_room.get(sur_id, "")
                     platform = SUR_TYPE_MAP.get(sur_type, "switch")
+                    brand    = sur.get("brand", "") or ""
+                    codeset  = sur.get("codeset", "") or ""
 
                     entry: dict = {
-                        "applianceId": sur_id,
-                        "moduleId":    sur_id,
+                        "applianceId":  sur_id,
+                        "moduleId":     sur_id,
                         "serialNumber": serial,
-                        "name":        raw_name or sur_type,
-                        "channelKey":  sur_type,
-                        "dimmable":    False,
-                        "platform":    platform,
-                        "hubName":     hub_name,
-                        "roomName":    room,
-                        "surBrand":    sur.get("brand", ""),
-                        "surCodeset":  sur.get("codeset", ""),
+                        "name":         raw_name or sur_type,
+                        "channelKey":   sur_type,
+                        "dimmable":     False,
+                        "platform":     platform,
+                        "hubName":      hub_name,
+                        "roomName":     room,
+                        "surBrand":     brand,
+                        "surCodeset":   codeset,
+                        "surCodeOn":    None,
+                        "surCodeOff":   None,
                     }
 
-                    # MOODlight extra fields
+                    # Fetch and store IR codes at config time so runtime
+                    # publish needs no DynamoDB call
+                    if platform != "moodlight" and brand and codeset:
+                        on_code, off_code = _fetch_ir_codes(
+                            dynamo, sur_type, brand, codeset
+                        )
+                        entry["surCodeOn"]  = on_code
+                        entry["surCodeOff"] = off_code
+                        if on_code:
+                            _LOGGER.info(
+                                "Zemote IR: stored codes for %s %s brand=%s codeset=%s on=%s off=%s",
+                                sur_type, sur_id, brand, codeset,
+                                bool(on_code), bool(off_code),
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "Zemote IR: could not fetch IR codes for %s %s brand=%s codeset=%s",
+                                sur_type, sur_id, brand, codeset,
+                            )
+
                     if platform == "moodlight":
                         entry["channelKey"] = "MDL"
                         _LOGGER.info(
@@ -341,62 +440,65 @@ def _fetch_account_data(email: str) -> dict:
 
         rgb = mod.get("rgbData")
         if rgb:
-            rgb_id = rgb.get("applianceId") or appliance_id
+            rgb_id   = rgb.get("applianceId") or appliance_id
             raw_name = _strip_module_prefix(rgb.get("name") or rgb_id, hub_name)
             if rgb_id and rgb_id not in seen_ids:
                 seen_ids.add(rgb_id)
                 room = appliance_room.get(rgb_id, "")
                 devices.append({
-                    "applianceId": rgb_id,
-                    "moduleId": appliance_id,
+                    "applianceId":  rgb_id,
+                    "moduleId":     appliance_id,
                     "serialNumber": serial,
-                    "name": raw_name,
-                    "channelKey": rgb.get("type", "RGB"),
-                    "dimmable": True,
-                    "platform": "light",
-                    "hubName": hub_name,
-                    "roomName": room,
-                    "isRgb": True,
+                    "name":         raw_name,
+                    "channelKey":   rgb.get("type", "RGB"),
+                    "dimmable":     True,
+                    "platform":     "light",
+                    "hubName":      hub_name,
+                    "roomName":     room,
+                    "isRgb":        True,
                 })
 
     for master in masters:
         serial = str(master.get("serialNumber", ""))
         if "slm" not in serial.lower():
             continue
-        appliance_id = master.get("applianceId", "") or serial_to_master.get(serial, {}).get("applianceId", "")
+        appliance_id = (
+            master.get("applianceId", "")
+            or serial_to_master.get(serial, {}).get("applianceId", "")
+        )
         if not appliance_id:
-            module = next((m for m in modules if m.get("serialNumber") == serial), None)
+            module       = next((m for m in modules if m.get("serialNumber") == serial), None)
             appliance_id = module.get("applianceId", "") if module else ""
         if not appliance_id or appliance_id in seen_ids:
             continue
 
         lock_module = next((m for m in modules if m.get("serialNumber") == serial), None)
-        device_id = _pick_lock_device_id(lock_module or {})
+        device_id   = _pick_lock_device_id(lock_module or {})
         if device_id:
             _LOGGER.info("Zemote config_flow: lock %s deviceId=%s", serial, device_id)
         else:
             _LOGGER.warning("Zemote config_flow: lock %s — no deviceId found in lockData", serial)
 
         seen_ids.add(appliance_id)
-        room = appliance_room.get(appliance_id, "Other") or "Other"
+        room     = appliance_room.get(appliance_id, "Other") or "Other"
         raw_name = master.get("deviceName") or appliance_id or serial
         devices.append({
-            "applianceId": appliance_id,
-            "moduleId": appliance_id,
+            "applianceId":  appliance_id,
+            "moduleId":     appliance_id,
             "serialNumber": serial,
-            "name": raw_name,
-            "channelKey": "LOCK",
-            "dimmable": False,
-            "platform": "lock",
-            "hubName": raw_name,
-            "roomName": room,
+            "name":         raw_name,
+            "channelKey":   "LOCK",
+            "dimmable":     False,
+            "platform":     "lock",
+            "hubName":      raw_name,
+            "roomName":     room,
             "isLockModule": True,
-            "deviceId": device_id,
+            "deviceId":     device_id,
         })
 
     _LOGGER.info("Zemote: discovered %d devices for %s", len(devices), email)
     return {
         "identity_id": identity_id,
-        "devices": devices,
-        "rooms": room_list,
+        "devices":     devices,
+        "rooms":       room_list,
     }
