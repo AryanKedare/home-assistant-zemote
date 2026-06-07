@@ -13,13 +13,20 @@ Flow:
     └─ dispatcher → _handle_update(reported)
         └─ NLK in reported → update state + schedule auto-relock
 
-Security:
-  async_unlock() enforces a home-network safeguard.
-  Requests that arrive via the HA HTTP layer (Companion App, web UI, REST API)
-  must originate from an IP that falls within one of the local subnets
-  reported by homeassistant.components.network.  Cloud/remote requests are
-  blocked.  Internal HA automations and scripts (which carry no origin_ip)
-  are always allowed.
+Security — home-network safeguard:
+  async_unlock() calls _enforce_home_network() before publishing the
+  NLK command.  The check uses two fields from the HA request context:
+
+    origin_ip  — set by HA HTTP middleware on every direct HTTP request
+                  (web UI, Companion App on LAN, REST API)
+    user_id    — set for any authenticated session, including cloud relay
+                  sessions (Nabu Casa) that carry no origin_ip
+
+  Decision table:
+    origin_ip present, local subnet   → ALLOW
+    origin_ip present, external IP    → BLOCK
+    origin_ip absent,  user_id absent → ALLOW  (internal: automation/script)
+    origin_ip absent,  user_id set    → BLOCK  (cloud/remote: Nabu Casa etc.)
 
 Spurious-unlock prevention:
   AWS IoT echoes shadow updates back as update/accepted messages that include
@@ -112,10 +119,7 @@ class ZemoteLock(LockEntity):
         self._nlk_last: str | None = None
 
         # Spurious-unlock guard — see module docstring.
-        # Tracks the NLK value we most recently *acted on*.
         self._nlk_processed: str | None = None
-        # Set to True while an unlock command is in-flight so the very next
-        # NLK response is accepted even if the value looks repeated.
         self._unlock_pending: bool = False
 
     # ── State ───────────────────────────────────────────────
@@ -148,40 +152,59 @@ class ZemoteLock(LockEntity):
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the door — only permitted from the home network.
 
-        Requests arriving via the HA HTTP layer (web UI, Companion App, REST API)
-        must have an origin_ip that falls within a local subnet of this HA host.
-        Requests relayed through Nabu Casa or any external IP are blocked.
-        Internal calls from automations / scripts (no origin_ip) are allowed.
+        See module docstring for the full decision table.
         """
         if not self._device_id:
             _LOGGER.error("Zemote lock %s: no device ID — cannot unlock", self._serial)
             return
 
-        # ── Home-network safeguard ────────────────────────────
         await self._enforce_home_network(kwargs)
-        # ── End safeguard ─────────────────────────────────────
 
-        # Flag that the next NLK response is a direct reply to this command,
-        # so _handle_update accepts it even if the value is repeated.
         self._unlock_pending = True
-
         _LOGGER.info("Zemote lock %s: publishing NLK=%s", self._serial, self._device_id)
         self._hub.publish(self._serial, {"NLK": self._device_id})
 
     async def _enforce_home_network(self, kwargs: dict) -> None:
-        """Raise HomeAssistantError if the caller is not on the home network."""
+        """Raise HomeAssistantError if the caller is not on the home network.
+
+        Decision table (see module docstring for full explanation):
+          origin_ip present + local subnet   → allow
+          origin_ip present + external IP    → block
+          origin_ip absent  + user_id absent → allow  (internal automation/script)
+          origin_ip absent  + user_id set    → block  (cloud/remote — Nabu Casa etc.)
+        """
         from homeassistant.components import network
 
         context = kwargs.get("context") or getattr(self, "_context", None)
         caller_ip_str: str | None = getattr(context, "origin_ip", None)
+        user_id: str | None = getattr(context, "user_id", None)
 
         if caller_ip_str is None:
-            _LOGGER.debug(
-                "Zemote lock %s: no origin_ip in context — allowing internal call",
-                self._serial,
-            )
-            return
+            if user_id is None:
+                # True internal call: automation, script, or other HA service
+                # running inside the HA process with no user session.
+                _LOGGER.debug(
+                    "Zemote lock %s: no origin_ip and no user_id — "
+                    "allowing trusted internal call",
+                    self._serial,
+                )
+                return
+            else:
+                # A user session exists but has no origin_ip.  This is the
+                # fingerprint of a Nabu Casa / remote cloud relay call —
+                # the request was forwarded by the cloud and the original
+                # external IP was not preserved as origin_ip.
+                _LOGGER.warning(
+                    "Zemote lock %s: unlock BLOCKED — remote/cloud session "
+                    "(user_id=%s, no origin_ip — likely Nabu Casa or remote access)",
+                    self._serial, user_id,
+                )
+                raise HomeAssistantError(
+                    "Unlock blocked: remote access via the cloud is not permitted. "
+                    "Connect to your home Wi-Fi to unlock the door."
+                )
 
+        # origin_ip is present — check it against local subnets.
         try:
             caller_ip = ipaddress.ip_address(caller_ip_str)
         except ValueError:
@@ -277,9 +300,6 @@ class ZemoteLock(LockEntity):
             desc = _NLK_CODES.get(nlk, f"unknown: {nlk}")
 
             # ── Spurious-unlock guard ─────────────────────────
-            # Ignore NLK values that are echoes of a previously processed
-            # response. A real reply to async_unlock() is flagged by
-            # _unlock_pending=True, which bypasses this check once.
             if nlk == self._nlk_processed and not self._unlock_pending:
                 _LOGGER.debug(
                     "Zemote lock %s: ignoring repeated/echoed NLK=%s",
@@ -291,7 +311,7 @@ class ZemoteLock(LockEntity):
             # ── End guard ─────────────────────────────────────
 
             self._nlk_processed = nlk
-            self._unlock_pending = False  # consumed
+            self._unlock_pending = False
             _LOGGER.info("Zemote lock %s NLK=%s (%s)", self._serial, nlk, desc)
 
             if nlk in ("ok", "203"):
