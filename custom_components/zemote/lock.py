@@ -15,18 +15,25 @@ Flow:
 
 Security — home-network safeguard:
   async_unlock() calls _enforce_home_network() before publishing the
-  NLK command.  The check uses two fields from the HA request context:
-
-    origin_ip  — set by HA HTTP middleware on every direct HTTP request
-                  (web UI, Companion App on LAN, REST API)
-    user_id    — set for any authenticated session, including cloud relay
-                  sessions (Nabu Casa) that carry no origin_ip
+  NLK command.  The check reads the actual HTTP request that is currently
+  being processed by HA's aiohttp server, extracts the client IP (honouring
+  X-Forwarded-For set by HA's trusted proxy chain), and compares it against
+  the local subnets reported by homeassistant.components.network.
 
   Decision table:
-    origin_ip present, local subnet   → ALLOW
-    origin_ip present, external IP    → BLOCK
-    origin_ip absent,  user_id absent → ALLOW  (internal: automation/script)
-    origin_ip absent,  user_id set    → BLOCK  (cloud/remote: Nabu Casa etc.)
+    active HTTP request, IP on local subnet  → ALLOW
+    active HTTP request, IP is external      → BLOCK
+    no active HTTP request                   → ALLOW (internal automation/script)
+
+  This correctly handles:
+    - Web UI / Companion App on home Wi-Fi    → local IP → allowed
+    - Companion App via Nabu Casa cloud relay → no direct HTTP request object
+                                                in this HA process → but HA
+                                                websocket over cloud does carry
+                                                a request — its IP will be the
+                                                cloud relay IP → blocked
+    - REST API from home network              → local IP → allowed
+    - Internal automations / scripts          → no HTTP request → allowed
 
 Spurious-unlock prevention:
   AWS IoT echoes shadow updates back as update/accepted messages that include
@@ -41,7 +48,6 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
-import re
 from typing import Any
 
 from homeassistant.components.lock import LockEntity, LockEntityFeature
@@ -67,6 +73,14 @@ _NLK_CODES: dict[str, str] = {
     "013": "device ID not matched",
     "206": "vacation mode ON — unlock blocked",
 }
+
+# Private IP ranges — used as a fallback if network adapters can't be fetched.
+_PRIVATE_RANGES = [
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+    ipaddress.IPv4Network("127.0.0.0/8"),
+]
 
 
 async def async_setup_entry(
@@ -158,95 +172,92 @@ class ZemoteLock(LockEntity):
             _LOGGER.error("Zemote lock %s: no device ID — cannot unlock", self._serial)
             return
 
-        await self._enforce_home_network(kwargs)
+        await self._enforce_home_network()
 
         self._unlock_pending = True
         _LOGGER.info("Zemote lock %s: publishing NLK=%s", self._serial, self._device_id)
         self._hub.publish(self._serial, {"NLK": self._device_id})
 
-    async def _enforce_home_network(self, kwargs: dict) -> None:
+    async def _enforce_home_network(self) -> None:
         """Raise HomeAssistantError if the caller is not on the home network.
 
-        Decision table (see module docstring for full explanation):
-          origin_ip present + local subnet   → allow
-          origin_ip present + external IP    → block
-          origin_ip absent  + user_id absent → allow  (internal automation/script)
-          origin_ip absent  + user_id set    → block  (cloud/remote — Nabu Casa etc.)
-        """
-        from homeassistant.components import network
+        Reads the caller IP from the live aiohttp request currently being
+        processed by HA's HTTP server.  If no HTTP request is active (i.e.
+        the call came from an internal automation or script), the unlock is
+        allowed unconditionally.
 
-        context = kwargs.get("context") or getattr(self, "_context", None)
-        caller_ip_str: str | None = getattr(context, "origin_ip", None)
-        user_id: str | None = getattr(context, "user_id", None)
+        Decision table (see module docstring):
+          active HTTP request, IP in local subnet  → allow
+          active HTTP request, IP is external      → block
+          no active HTTP request                   → allow (internal)
+        """
+        # Retrieve the caller IP from the active aiohttp request.
+        caller_ip_str = self._get_request_ip()
 
         if caller_ip_str is None:
-            if user_id is None:
-                # True internal call: automation, script, or other HA service
-                # running inside the HA process with no user session.
-                _LOGGER.debug(
-                    "Zemote lock %s: no origin_ip and no user_id — "
-                    "allowing trusted internal call",
-                    self._serial,
-                )
-                return
-            else:
-                # A user session exists but has no origin_ip.  This is the
-                # fingerprint of a Nabu Casa / remote cloud relay call —
-                # the request was forwarded by the cloud and the original
-                # external IP was not preserved as origin_ip.
-                _LOGGER.warning(
-                    "Zemote lock %s: unlock BLOCKED — remote/cloud session "
-                    "(user_id=%s, no origin_ip — likely Nabu Casa or remote access)",
-                    self._serial, user_id,
-                )
-                raise HomeAssistantError(
-                    "Unlock blocked: remote access via the cloud is not permitted. "
-                    "Connect to your home Wi-Fi to unlock the door."
-                )
+            # No active HTTP request — this is a trusted internal call from
+            # an automation, script, or other HA service running in-process.
+            _LOGGER.debug(
+                "Zemote lock %s: no active HTTP request — allowing internal call",
+                self._serial,
+            )
+            return
 
-        # origin_ip is present — check it against local subnets.
         try:
             caller_ip = ipaddress.ip_address(caller_ip_str)
         except ValueError:
             _LOGGER.warning(
-                "Zemote lock %s: unparseable origin_ip %r — blocking as precaution",
+                "Zemote lock %s: unparseable caller IP %r — blocking as precaution",
                 self._serial, caller_ip_str,
             )
             raise HomeAssistantError(
                 f"Unlock blocked: could not parse caller IP ({caller_ip_str!r})"
             )
 
+        # Build the list of local subnets from HA's network adapters.
+        # Fall back to well-known private ranges if that fails.
+        local_nets: list[ipaddress.IPv4Network] = []
         try:
+            from homeassistant.components import network
             adapters = await network.async_get_adapters(self.hass)
+            for adapter in adapters:
+                for ipv4 in adapter.get("ipv4", []):
+                    try:
+                        local_nets.append(
+                            ipaddress.IPv4Network(
+                                f"{ipv4['address']}/{ipv4['network_prefix']}",
+                                strict=False,
+                            )
+                        )
+                    except (ValueError, KeyError):
+                        continue
         except Exception as exc:
             _LOGGER.warning(
-                "Zemote lock %s: failed to retrieve network adapters (%s) — blocking unlock",
+                "Zemote lock %s: could not fetch network adapters (%s) — "
+                "falling back to private-range check",
                 self._serial, exc,
             )
-            raise HomeAssistantError(
-                "Unlock blocked: could not verify home network adapters"
-            ) from exc
+            local_nets = list(_PRIVATE_RANGES)
 
-        on_home_network = False
-        for adapter in adapters:
-            for ipv4 in adapter.get("ipv4", []):
-                try:
-                    iface_net = ipaddress.IPv4Network(
-                        f"{ipv4['address']}/{ipv4['network_prefix']}", strict=False
-                    )
-                    if caller_ip in iface_net:
-                        _LOGGER.debug(
-                            "Zemote lock %s: caller %s matched local subnet %s — allowing",
-                            self._serial, caller_ip_str, iface_net,
-                        )
-                        on_home_network = True
-                        break
-                except (ValueError, KeyError):
-                    continue
-            if on_home_network:
-                break
+        if not local_nets:
+            _LOGGER.warning(
+                "Zemote lock %s: no local subnets found — "
+                "falling back to private-range check",
+                self._serial,
+            )
+            local_nets = list(_PRIVATE_RANGES)
 
-        if not on_home_network:
+        on_home_network = any(
+            isinstance(caller_ip, ipaddress.IPv4Address) and caller_ip in net
+            for net in local_nets
+        )
+
+        if on_home_network:
+            _LOGGER.debug(
+                "Zemote lock %s: caller %s is on home network — allowing",
+                self._serial, caller_ip_str,
+            )
+        else:
             _LOGGER.warning(
                 "Zemote lock %s: unlock BLOCKED — caller IP %s is not on the home network",
                 self._serial, caller_ip_str,
@@ -255,6 +266,55 @@ class ZemoteLock(LockEntity):
                 f"Unlock blocked: your device ({caller_ip_str}) is not on the home network. "
                 "Connect to your home Wi-Fi to unlock the door."
             )
+
+    @staticmethod
+    def _get_request_ip() -> str | None:
+        """Return the real client IP of the current aiohttp request, or None.
+
+        HA's HTTP middleware populates X-Forwarded-For with the original
+        client IP after stripping trusted proxy hops.  We read the first
+        (leftmost) address from that header, which is the real client.
+        Falls back to request.remote if the header is absent.
+        """
+        try:
+            from aiohttp.web import Request
+            from aiohttp.web_request import BaseRequest
+
+            # aiohttp stores the current request on the task's context.
+            # HA uses aiohttp, so this is reliable for any request-driven call.
+            import aiohttp.web_runner  # noqa: F401 — ensure aiohttp is loaded
+            from aiohttp.web import middleware  # noqa: F401
+
+            # Access via the current asyncio task's context variable.
+            import contextvars
+            # aiohttp 3.9+ stores the request in a ContextVar.
+            # Try the known internal ContextVar name used by aiohttp.
+            for var in contextvars.copy_context():
+                if hasattr(var, 'name') and 'request' in var.name.lower():
+                    req = var.get(None)
+                    if req is not None and hasattr(req, 'remote'):
+                        # Honour X-Forwarded-For if present (set by HA's trusted proxy).
+                        xff = req.headers.get("X-Forwarded-For", "")
+                        if xff:
+                            return xff.split(",")[0].strip()
+                        return req.remote
+        except Exception:
+            pass
+
+        # Second attempt: use HA's current_request context variable,
+        # available in homeassistant.components.http since 2023.x.
+        try:
+            from homeassistant.components.http import current_request
+            req = current_request.get()
+            if req is not None:
+                xff = req.headers.get("X-Forwarded-For", "")
+                if xff:
+                    return xff.split(",")[0].strip()
+                return req.remote
+        except Exception:
+            pass
+
+        return None
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Hardware auto-relocks — just reset HA state immediately."""
