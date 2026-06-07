@@ -12,10 +12,19 @@ Flow:
   _on_shadow_message() in hub
     └─ dispatcher → _handle_update(reported)
         └─ NLK in reported → update state + schedule auto-relock
+
+Security:
+  async_unlock() enforces a home-network safeguard.
+  Requests that arrive via the HA HTTP layer (Companion App, web UI, REST API)
+  must originate from an IP that falls within one of the local subnets
+  reported by homeassistant.components.network.  Cloud/remote requests are
+  blocked.  Internal HA automations and scripts (which carry no origin_ip)
+  are always allowed.
 """
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
 from typing import Any
@@ -23,6 +32,7 @@ from typing import Any
 from homeassistant.components.lock import LockEntity, LockEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -121,11 +131,106 @@ class ZemoteLock(LockEntity):
     # ── Actions ─────────────────────────────────────────────
 
     async def async_unlock(self, **kwargs: Any) -> None:
+        """Unlock the door — only permitted from the home network.
+
+        Requests arriving via the HA HTTP layer (web UI, Companion App, REST API)
+        must have an origin_ip that falls within a local subnet of this HA host.
+        Requests relayed through Nabu Casa or any external IP are blocked.
+        Internal calls from automations / scripts (no origin_ip) are allowed.
+        """
         if not self._device_id:
             _LOGGER.error("Zemote lock %s: no device ID — cannot unlock", self._serial)
             return
+
+        # ── Home-network safeguard ───────────────────────────────────────────
+        await self._enforce_home_network(kwargs)
+        # ── End safeguard ────────────────────────────────────────────────────
+
         _LOGGER.info("Zemote lock %s: publishing NLK=%s", self._serial, self._device_id)
         self._hub.publish(self._serial, {"NLK": self._device_id})
+
+    async def _enforce_home_network(self, kwargs: dict) -> None:
+        """Raise HomeAssistantError if the caller is not on the home network.
+
+        Algorithm
+        ---------
+        1. Extract origin_ip from the HA request context (set by HTTP middleware).
+        2. Fetch all network adapters from homeassistant.components.network.
+        3. Build an IPv4Network for every adapter interface.
+        4. Allow if the caller IP is contained in any local subnet.
+        5. If no origin_ip is present the call is internal (automation/script) → allow.
+        6. If the network check itself fails → block as a fail-safe.
+        """
+        from homeassistant.components import network  # local import — optional component
+
+        context = kwargs.get("context") or getattr(self, "_context", None)
+        caller_ip_str: str | None = getattr(context, "origin_ip", None)
+
+        if caller_ip_str is None:
+            # No HTTP origin → internal HA call (automation, script, etc.) — allow.
+            _LOGGER.debug(
+                "Zemote lock %s: no origin_ip in context — allowing internal call",
+                self._serial,
+            )
+            return
+
+        try:
+            caller_ip = ipaddress.ip_address(caller_ip_str)
+        except ValueError:
+            _LOGGER.warning(
+                "Zemote lock %s: unparseable origin_ip %r — blocking as precaution",
+                self._serial, caller_ip_str,
+            )
+            raise HomeAssistantError(
+                f"Unlock blocked: could not parse caller IP ({caller_ip_str!r})"
+            )
+
+        # Loopback / link-local are always considered local.
+        if caller_ip.is_loopback or caller_ip.is_link_local or caller_ip.is_private:
+            # Private RFC-1918 range: 10.x, 172.16-31.x, 192.168.x
+            # We still cross-check against actual adapters so VPNs with private
+            # ranges that route externally don't bypass the guard.
+            pass  # fall through to adapter check below
+
+        try:
+            adapters = await network.async_get_adapters(self.hass)
+        except Exception as exc:
+            _LOGGER.warning(
+                "Zemote lock %s: failed to retrieve network adapters (%s) — blocking unlock",
+                self._serial, exc,
+            )
+            raise HomeAssistantError(
+                "Unlock blocked: could not verify home network adapters"
+            ) from exc
+
+        on_home_network = False
+        for adapter in adapters:
+            for ipv4 in adapter.get("ipv4", []):
+                try:
+                    iface_net = ipaddress.IPv4Network(
+                        f"{ipv4['address']}/{ipv4['network_prefix']}", strict=False
+                    )
+                    if caller_ip in iface_net:
+                        _LOGGER.debug(
+                            "Zemote lock %s: caller %s matched local subnet %s — allowing",
+                            self._serial, caller_ip_str, iface_net,
+                        )
+                        on_home_network = True
+                        break
+                except (ValueError, KeyError):
+                    continue
+            if on_home_network:
+                break
+
+        if not on_home_network:
+            _LOGGER.warning(
+                "Zemote lock %s: unlock BLOCKED — caller IP %s is not on the home network",
+                self._serial, caller_ip_str,
+            )
+            raise HomeAssistantError(
+                f"Unlock blocked: your device ({caller_ip_str}) is not on the home network. "
+                "Connect to your home Wi-Fi to unlock the door."
+            )
 
     async def async_lock(self, **kwargs: Any) -> None:
         """Hardware auto-relocks — just reset HA state immediately."""
