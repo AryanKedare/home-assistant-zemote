@@ -20,6 +20,14 @@ Security:
   reported by homeassistant.components.network.  Cloud/remote requests are
   blocked.  Internal HA automations and scripts (which carry no origin_ip)
   are always allowed.
+
+Spurious-unlock prevention:
+  AWS IoT echoes shadow updates back as update/accepted messages that include
+  the previous reported state (including old NLK values).  Additionally,
+  shadow/get responses on startup replay the last stored NLK.  To avoid
+  acting on stale NLK echoes, _handle_update tracks the last *processed*
+  NLK value and ignores repeated/identical values — a real unlock always
+  arrives with _unlock_pending=True set by async_unlock().
 """
 from __future__ import annotations
 
@@ -103,6 +111,13 @@ class ZemoteLock(LockEntity):
         self._vacation: str | None = None
         self._nlk_last: str | None = None
 
+        # Spurious-unlock guard — see module docstring.
+        # Tracks the NLK value we most recently *acted on*.
+        self._nlk_processed: str | None = None
+        # Set to True while an unlock command is in-flight so the very next
+        # NLK response is accepted even if the value looks repeated.
+        self._unlock_pending: bool = False
+
     # ── State ───────────────────────────────────────────────
 
     @property
@@ -142,32 +157,25 @@ class ZemoteLock(LockEntity):
             _LOGGER.error("Zemote lock %s: no device ID — cannot unlock", self._serial)
             return
 
-        # ── Home-network safeguard ───────────────────────────────────────────
+        # ── Home-network safeguard ────────────────────────────
         await self._enforce_home_network(kwargs)
-        # ── End safeguard ────────────────────────────────────────────────────
+        # ── End safeguard ─────────────────────────────────────
+
+        # Flag that the next NLK response is a direct reply to this command,
+        # so _handle_update accepts it even if the value is repeated.
+        self._unlock_pending = True
 
         _LOGGER.info("Zemote lock %s: publishing NLK=%s", self._serial, self._device_id)
         self._hub.publish(self._serial, {"NLK": self._device_id})
 
     async def _enforce_home_network(self, kwargs: dict) -> None:
-        """Raise HomeAssistantError if the caller is not on the home network.
-
-        Algorithm
-        ---------
-        1. Extract origin_ip from the HA request context (set by HTTP middleware).
-        2. Fetch all network adapters from homeassistant.components.network.
-        3. Build an IPv4Network for every adapter interface.
-        4. Allow if the caller IP is contained in any local subnet.
-        5. If no origin_ip is present the call is internal (automation/script) → allow.
-        6. If the network check itself fails → block as a fail-safe.
-        """
-        from homeassistant.components import network  # local import — optional component
+        """Raise HomeAssistantError if the caller is not on the home network."""
+        from homeassistant.components import network
 
         context = kwargs.get("context") or getattr(self, "_context", None)
         caller_ip_str: str | None = getattr(context, "origin_ip", None)
 
         if caller_ip_str is None:
-            # No HTTP origin → internal HA call (automation, script, etc.) — allow.
             _LOGGER.debug(
                 "Zemote lock %s: no origin_ip in context — allowing internal call",
                 self._serial,
@@ -184,13 +192,6 @@ class ZemoteLock(LockEntity):
             raise HomeAssistantError(
                 f"Unlock blocked: could not parse caller IP ({caller_ip_str!r})"
             )
-
-        # Loopback / link-local are always considered local.
-        if caller_ip.is_loopback or caller_ip.is_link_local or caller_ip.is_private:
-            # Private RFC-1918 range: 10.x, 172.16-31.x, 192.168.x
-            # We still cross-check against actual adapters so VPNs with private
-            # ranges that route externally don't bypass the guard.
-            pass  # fall through to adapter check below
 
         try:
             adapters = await network.async_get_adapters(self.hass)
@@ -274,6 +275,23 @@ class ZemoteLock(LockEntity):
             nlk = str(reported["NLK"])
             self._nlk_last = nlk
             desc = _NLK_CODES.get(nlk, f"unknown: {nlk}")
+
+            # ── Spurious-unlock guard ─────────────────────────
+            # Ignore NLK values that are echoes of a previously processed
+            # response. A real reply to async_unlock() is flagged by
+            # _unlock_pending=True, which bypasses this check once.
+            if nlk == self._nlk_processed and not self._unlock_pending:
+                _LOGGER.debug(
+                    "Zemote lock %s: ignoring repeated/echoed NLK=%s",
+                    self._serial, nlk,
+                )
+                if changed:
+                    self.async_write_ha_state()
+                return
+            # ── End guard ─────────────────────────────────────
+
+            self._nlk_processed = nlk
+            self._unlock_pending = False  # consumed
             _LOGGER.info("Zemote lock %s NLK=%s (%s)", self._serial, nlk, desc)
 
             if nlk in ("ok", "203"):
@@ -320,10 +338,10 @@ class ZemoteLock(LockEntity):
                 self._handle_update,
             )
         )
-        if self._hub._mqtt and self._hub._mqtt.is_connected():
-            self._hub._mqtt.publish(
-                f"$aws/things/{self._serial}/shadow/get", "", qos=0
-            )
+        # NOTE: Intentionally no shadow/get here.
+        # A get/accepted response replays the last stored NLK from AWS IoT,
+        # which would cause a spurious unlock on every HA restart.
+        # Lock state is event-driven — only changes on a real async_unlock().
 
     async def async_will_remove_from_hass(self) -> None:
         self._cancel_relock()

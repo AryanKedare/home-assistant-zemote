@@ -214,14 +214,30 @@ class ZemoteHub:
                 _LOGGER.debug("Zemote: subscribed to %s", topic)
 
     def _ping_all(self) -> None:
-        serials = {d["serialNumber"] for d in self.devices}
+        """Send startup pings to non-lock devices only.
+
+        Lock devices are intentionally excluded from the shadow/get ping.
+        AWS IoT would respond with a get/accepted carrying the full shadow
+        state, which includes the last stored NLK response. Dispatching
+        that to ZemoteLock._handle_update would trigger a spurious unlock
+        on every HA restart (e.g. NLK=203 persisted in shadow -> door
+        appears unlocked / auto-relock fires unnecessarily).
+
+        Lock state is purely event-driven: it only changes when the user
+        actually calls async_unlock().
+        """
         lock_serials = {d["serialNumber"] for d in self.devices if d.get("platform") == "lock"}
-        for serial in serials - lock_serials:
+        non_lock_serials = {
+            d["serialNumber"] for d in self.devices
+            if d.get("platform") != "lock"
+        }
+        for serial in non_lock_serials:
             self.publish(serial, {"PING": "ping"}, _bypass_check=True)
-        for serial in lock_serials:
-            topic = f"$aws/things/{serial}/shadow/get"
-            self._mqtt.publish(topic, "", qos=0)
-            _LOGGER.debug("Zemote -> %s : <empty>", topic)
+        if lock_serials:
+            _LOGGER.debug(
+                "Zemote: skipping shadow/get ping for lock(s) %s to prevent spurious unlocks",
+                lock_serials,
+            )
 
     def _on_shadow_message(self, client, userdata, message) -> None:
         try:
@@ -289,7 +305,6 @@ class ZemoteHub:
         code is stored (toggle devices), the same code is used for both
         on and off.
         """
-        # Prefer dedicated on/off codes; fall back to the toggle code
         if want_on:
             code = (
                 self._device_ir_code(serial, "surCodeOn")
@@ -309,7 +324,6 @@ class ZemoteHub:
             )
             return False
 
-        # Publish using the confirmed shadow key 'code'
         self.publish(serial, {"code": code})
         _LOGGER.info(
             "Zemote IR: sent %s command to serial=%s type=%s code[0:40]=%s",
