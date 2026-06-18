@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -127,6 +128,7 @@ class ZemoteHub:
         self._cert_data = cert_data
         self._creds: dict = creds or {}
         self._mqtt = None
+        self._reconnecting: bool = False
         self.devices: list[dict] = entry.data.get("devices", [])
         self.device_states: dict[str, dict] = {}
 
@@ -136,6 +138,7 @@ class ZemoteHub:
         self._ping_all()
 
     def disconnect(self) -> None:
+        self._reconnecting = True  # Prevent reconnect loop on intentional disconnect
         if self._mqtt:
             try:
                 self._mqtt.loop_stop()
@@ -179,7 +182,9 @@ class ZemoteHub:
             client.on_disconnect = self._on_disconnect
             client.on_message = self._on_shadow_message
 
-            client.connect(AWS_IOT_ENDPOINT, port=8883, keepalive=60)
+            # keepalive=300 reduces AWS IoT idle-disconnect frequency (default 60s
+            # causes unnecessary drops; AWS IoT supports up to 1200s).
+            client.connect(AWS_IOT_ENDPOINT, port=8883, keepalive=300)
             client.loop_start()
 
             for _ in range(100):
@@ -204,7 +209,71 @@ class ZemoteHub:
     def _on_disconnect(self, client, userdata, rc_or_flags, rc=None, properties=None) -> None:
         code = rc if rc is not None else rc_or_flags
         if code != 0:
-            _LOGGER.warning("Zemote MQTT unexpectedly disconnected (rc=%s)", code)
+            _LOGGER.warning(
+                "Zemote MQTT unexpectedly disconnected (rc=%s); scheduling reconnect...", code
+            )
+            if not self._reconnecting:
+                self.hass.loop.call_soon_threadsafe(
+                    self.hass.async_create_task,
+                    self._async_reconnect(),
+                )
+
+    async def _async_reconnect(self) -> None:
+        """Reconnect to AWS IoT MQTT with exponential back-off.
+
+        Refreshes Cognito session credentials before each attempt because
+        they expire after ~1 hour — using stale credentials would cause the
+        new MQTT connection to be rejected by AWS IoT.
+        """
+        if self._reconnecting:
+            return
+        self._reconnecting = True
+        try:
+            for attempt in range(1, 6):
+                wait = min(5 * attempt, 25)
+                _LOGGER.info(
+                    "Zemote: reconnect attempt %d/5 in %ds...", attempt, wait
+                )
+                await asyncio.sleep(wait)
+                try:
+                    await self.hass.async_add_executor_job(self._reconnect_sync)
+                    _LOGGER.info("Zemote: MQTT reconnected successfully (attempt %d)", attempt)
+                    return
+                except Exception as err:
+                    _LOGGER.error(
+                        "Zemote: reconnect attempt %d failed: %s", attempt, err
+                    )
+            _LOGGER.error(
+                "Zemote: all 5 reconnect attempts failed. "
+                "Reload the integration manually to restore connectivity."
+            )
+        finally:
+            self._reconnecting = False
+
+    def _reconnect_sync(self) -> None:
+        """Tear down the old MQTT client, refresh Cognito creds, and reconnect.
+
+        Called from an executor thread (not the event loop) so blocking I/O
+        (boto3 calls, TCP handshake) is safe here.
+        """
+        # Stop and discard the stale client
+        if self._mqtt:
+            try:
+                self._mqtt.loop_stop()
+                self._mqtt.disconnect()
+            except Exception:
+                pass
+            self._mqtt = None
+
+        # Cognito session tokens expire in ~1 hour — always fetch fresh ones
+        identity_id = self.entry.data.get("identity_id", "")
+        self._creds = _fetch_cognito_credentials(identity_id, AWS_REGION_COGNITO)
+        _LOGGER.debug("Zemote: refreshed Cognito credentials for reconnect")
+
+        # Re-establish TLS connection and restore subscriptions
+        self._connect_mqtt()
+        self._subscribe_all()
+        self._ping_all()
 
     def _subscribe_all(self) -> None:
         for serial in {d["serialNumber"] for d in self.devices}:
